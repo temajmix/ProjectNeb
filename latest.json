@@ -1,17 +1,17 @@
 {
-  "version": "0.1.2",
+  "version": "0.1.3",
   "channel": "beta",
   "released": "2026-11-17",
-  "notes": "Проверка автообновления: обновление приходит по воздуху, показывает краткое описание и открывает полный changelog.",
+  "notes": "Апдейтер теперь входит в установщик и портативную сборку; манифест обновлений читается без задержки кэша.",
   "changelogUrl": "https://github.com/temajmix/ProjectNeb/blob/main/CHANGELOG.md",
   "assets": {
     "portable": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.1.2/ProjectNeb-0.1.2-beta-portable.zip",
-      "sha256": "1C2941AABAA0AF57A4ABD0D1252BEF9BD51D06D0B1D88F8D4068EDB27055CE2A"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.1.3/ProjectNeb-0.1.3-beta-portable.zip",
+      "sha256": "F490668A6AC1DCB1E714A318ECCD1CDF45895AB19B91D997E63573C281D06CDB"
     },
     "setup": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.1.2/ProjectNeb-0.1.2-beta-setup.exe",
-      "sha256": "D86AD1F100D1CFF24FC541BF7A559590E43A60197FC53EAC61BBF921F013D31C"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.1.3/ProjectNeb-0.1.3-beta-setup.exe",
+      "sha256": "6E219112DC23950588E2304403BCDB12E505E59A8542155CF4F69E46A4C1D6DE"
     }
   }
 }
