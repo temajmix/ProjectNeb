@@ -1,0 +1,28 @@
+﻿{
+  "schemaVersion": 1,
+  "language": "ru",
+  "theme": { "name": "Dark" },
+  "modules": { "wallpapers": true, "zapret": false, "windhawk": false, "discordRp": false },
+  "window": { "left": null, "top": null, "width": 1280, "height": 800, "maximized": false },
+  "wallpapers": {
+    "enabled": true,
+    "kind": "Color",
+    "path": null,
+    "color": "#141021",
+    "playlist": [],
+    "rotateMinutes": 30,
+    "pauseOnFullscreen": true,
+    "pauseOnBattery": true
+  },
+  "shell": {
+    "barEnabled": true,
+    "barPosition": "top",
+    "barHeight": 40,
+    "themeId": "liquid-glass",
+    "profileName": null,
+    "dockEnabled": true,
+    "pinnedApps": [],
+    "dockAutoHide": true
+  }
+}
+

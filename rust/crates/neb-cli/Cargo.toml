@@ -1,0 +1,19 @@
+[package]
+name = "neb-cli"
+description = "ProjectNeb diagnostics CLI: config, metrics, ping, windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+neb-core = { path = "../neb-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+windows = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

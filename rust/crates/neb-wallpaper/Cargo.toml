@@ -1,0 +1,38 @@
+[package]
+name = "neb-wallpaper"
+description = "ProjectNeb living wallpaper: D3D11 aurora behind the desktop icons, no WebView2 and no .NET"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "neb_wallpaper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "neb-wallpaper"
+path = "src/main.rs"
+
+[dependencies]
+neb-core = { path = "../neb-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+] }
+
+[lints]
+workspace = true

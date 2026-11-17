@@ -1,0 +1,50 @@
+[package]
+name = "neb-shell"
+description = "ProjectNeb native shell bar: Win32 + Direct2D, no WebView2 and no .NET"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "neb_shell"
+path = "src/lib.rs"
+
+[[bin]]
+name = "neb-shell"
+path = "src/main.rs"
+
+[features]
+# Compiles the tests/paint_no_alloc.rs harness, which carries a counting global allocator and paints
+# a hundred frames against a real Direct2D target. Off by default so a headless `cargo test` stays
+# deterministic; run it with `cargo test -p neb-shell --features alloc-check`.
+alloc-check = []
+
+[dependencies]
+neb-core = { path = "../neb-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+windows-numerics = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Globalization",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+] }
+
+[lints]
+workspace = true
+
+
