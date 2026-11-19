@@ -1,17 +1,17 @@
 {
-  "version": "0.4.2",
+  "version": "0.5.0",
   "channel": "beta",
   "released": "2026-11-19",
-  "notes": "Okno bez sistemnoy polosy: zagolovok i knopki vnutri prilozheniya, peretaskivanie za shapku, dvoynoy klik razvorachivaet.",
+  "notes": "Palette Ctrl+K, onboarding, resets, shortcut help. Performance profiles (10/30/60 fps wallpapers, live switching). Zapret folder pick and auto-detect, saved Discord app ID, clearer Windhawk states. Frameless window.",
   "changelogUrl": "https://github.com/temajmix/ProjectNeb/blob/main/CHANGELOG.md",
   "assets": {
     "portable": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.4.2/ProjectNeb-0.4.2-beta-portable.zip",
-      "sha256": "0169CF1228E5438F5234DD9274D3A170E88668A9811F6026ED8B75731A5DE33E"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.5.0/ProjectNeb-0.5.0-beta-portable.zip",
+      "sha256": "129E574DEC24E0150B92842C10789E2A12DCF92B482452B8A315C7BC20302B71"
     },
     "setup": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.4.2/ProjectNeb-0.4.2-beta-setup.exe",
-      "sha256": "45EF42F6B0986DC99400657DEB8103AE227FEDEF1F3C9891AC4784E4A28D067D"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.5.0/ProjectNeb-0.5.0-beta-setup.exe",
+      "sha256": "7420C9BC10287A8736C4FFB26C45CDB8A23DAC0168708DB26F92F46CA277ECDC"
     }
   }
 }
