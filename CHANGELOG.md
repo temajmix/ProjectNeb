@@ -2,6 +2,10 @@
 
 Все заметные изменения ProjectNeb. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 
+## [0.6.0] — 2026-11-19
+
+Six built-in theme presets with a live gallery, Profiles screen (save/apply/delete), window slide-in animation, Ctrl+W/Ctrl+M/F11 and Russian-layout hotkey fix, maximize within the work area, CI workflow, signing guide and winget manifests.
+
 ## [0.5.0] — 2026-11-19
 
 Palette Ctrl+K, onboarding, resets, shortcut help. Performance profiles (10/30/60 fps wallpapers, live switching). Zapret folder pick and auto-detect, saved Discord app ID, clearer Windhawk states. Frameless window.

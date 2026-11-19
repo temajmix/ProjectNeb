@@ -1,17 +1,17 @@
 {
-  "version": "0.5.0",
+  "version": "0.6.0",
   "channel": "beta",
   "released": "2026-11-19",
-  "notes": "Palette Ctrl+K, onboarding, resets, shortcut help. Performance profiles (10/30/60 fps wallpapers, live switching). Zapret folder pick and auto-detect, saved Discord app ID, clearer Windhawk states. Frameless window.",
+  "notes": "Six built-in theme presets with a live gallery, Profiles screen (save/apply/delete), window slide-in animation, Ctrl+W/Ctrl+M/F11 and Russian-layout hotkey fix, maximize within the work area, CI workflow, signing guide and winget manifests.",
   "changelogUrl": "https://github.com/temajmix/ProjectNeb/blob/main/CHANGELOG.md",
   "assets": {
     "portable": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.5.0/ProjectNeb-0.5.0-beta-portable.zip",
-      "sha256": "129E574DEC24E0150B92842C10789E2A12DCF92B482452B8A315C7BC20302B71"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.6.0/ProjectNeb-0.6.0-beta-portable.zip",
+      "sha256": "F088DF9EF65BF1EE6CF94C3611258738A94DD40A0DA4E70A9BBEE382B811544A"
     },
     "setup": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.5.0/ProjectNeb-0.5.0-beta-setup.exe",
-      "sha256": "7420C9BC10287A8736C4FFB26C45CDB8A23DAC0168708DB26F92F46CA277ECDC"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.6.0/ProjectNeb-0.6.0-beta-setup.exe",
+      "sha256": "E76DCF025005FE0802EA00A5D169E5AF1287BEBC77049B1F1967625D85F00268"
     }
   }
 }
