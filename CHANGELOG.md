@@ -2,6 +2,10 @@
 
 Все заметные изменения ProjectNeb. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 
+## [0.6.1] — 2026-11-19
+
+Accessibility pass: focus rings, accessible names, contrast fixes (text 5.69:1, accent 4.82:1), reduced motion, Russian plurals. Version metadata aligned; regression sweep passed (install/uninstall, 13 screens, crash recovery, local update, 10-min soak).
+
 ## [0.6.0] — 2026-11-19
 
 Six built-in theme presets with a live gallery, Profiles screen (save/apply/delete), window slide-in animation, Ctrl+W/Ctrl+M/F11 and Russian-layout hotkey fix, maximize within the work area, CI workflow, signing guide and winget manifests.

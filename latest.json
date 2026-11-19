@@ -1,17 +1,17 @@
 {
-  "version": "0.6.0",
+  "version": "0.6.1",
   "channel": "beta",
   "released": "2026-11-19",
-  "notes": "Six built-in theme presets with a live gallery, Profiles screen (save/apply/delete), window slide-in animation, Ctrl+W/Ctrl+M/F11 and Russian-layout hotkey fix, maximize within the work area, CI workflow, signing guide and winget manifests.",
+  "notes": "Accessibility pass: focus rings, accessible names, contrast fixes (text 5.69:1, accent 4.82:1), reduced motion, Russian plurals. Version metadata aligned; regression sweep passed (install/uninstall, 13 screens, crash recovery, local update, 10-min soak).",
   "changelogUrl": "https://github.com/temajmix/ProjectNeb/blob/main/CHANGELOG.md",
   "assets": {
     "portable": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.6.0/ProjectNeb-0.6.0-beta-portable.zip",
-      "sha256": "F088DF9EF65BF1EE6CF94C3611258738A94DD40A0DA4E70A9BBEE382B811544A"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.6.1/ProjectNeb-0.6.1-beta-portable.zip",
+      "sha256": "1F77A8954FFA5DC87FA15D0359E0EFDF64DCB78BC03A73C31FAADE0032A69B2E"
     },
     "setup": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.6.0/ProjectNeb-0.6.0-beta-setup.exe",
-      "sha256": "E76DCF025005FE0802EA00A5D169E5AF1287BEBC77049B1F1967625D85F00268"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.6.1/ProjectNeb-0.6.1-beta-setup.exe",
+      "sha256": "DC0BB8A06D6443FD36B0A1449681D3AC44450E24AE05B2AE7AAD88ECBA1F1C6F"
     }
   }
 }
