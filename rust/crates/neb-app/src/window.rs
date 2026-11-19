@@ -1,20 +1,26 @@
-//! The settings window: a plain framed Win32 window with a dark title bar.
+//! The settings window: a frameless Win32 window with the dashboard's own title bar.
 //!
 //! The window is deliberately a frameless `WS_POPUP | WS_THICKFRAME`: the dashboard draws its own
-//! title bar inside the page, while the thick frame keeps the native resize borders.
-//! shell already owns the frameless surface, and a real frame gives the user resize borders,
-//! snap layouts and a system menu for free. The only cosmetic work is `DWMWA_USE_IMMERSIVE_DARK_MODE`
-//! so the caption matches the dark page instead of flashing white.
+//! title bar, while the thick frame keeps the native resize borders and the snap layouts. A popup
+//! has no caption for Windows to lay out, so `SW_MAXIMIZE` would cover the whole monitor, taskbar
+//! and ProjectNeb's own reserved bar included; [`maximize`] therefore sizes the window to the
+//! monitor's *work area* itself. The only cosmetic work is `DWMWA_USE_IMMERSIVE_DARK_MODE` so the
+//! frame matches the dark page instead of flashing white.
 //!
 //! `WM_NCCREATE` takes ownership of a boxed [`Setup`] and builds the window state the rest of the
 //! procedure needs; `WM_NCDESTROY` drops it, which is what releases the WebView2 controller.
 
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::time::Instant;
 
-use neb_core::config::{ConfigStore, WindowSettings};
+use neb_core::config::{AnimationSettings, ConfigStore, WindowSettings};
+use neb_core::logging::{Level, LogHandle};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
@@ -24,16 +30,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
     GetClientRect, GetMessageW, GetWindowLongPtrW, GetWindowRect, HTCAPTION, IDC_ARROW, IsIconic,
-    IsZoomed, LoadCursorW, MINMAXINFO, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
-    SPI_GETWORKAREA, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
-    ShowWindow, SystemParametersInfoW, TranslateMessage, WM_APP, WM_CLOSE, WM_DESTROY,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_MOVE, WM_NCCREATE, WM_NCDESTROY,
-    WM_NCLBUTTONDOWN, WM_SIZE, WNDCLASSW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+    IsZoomed, KillTimer, LoadCursorW, MINMAXINFO, MSG, PostMessageW, PostQuitMessage,
+    RegisterClassW, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SPI_GETWORKAREA, SW_MINIMIZE, SW_RESTORE,
+    SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW,
+    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    SystemParametersInfoW, TranslateMessage, WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_MOVE, WM_NCCREATE, WM_NCDESTROY, WM_NCLBUTTONDOWN, WM_SIZE,
+    WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
     WS_THICKFRAME,
 };
 use windows::core::PCWSTR;
 
+use crate::show_animation;
 use crate::webview::WebView;
 
 /// Window class this process registers.
@@ -65,6 +73,9 @@ pub const START_DRAG: u32 = WM_APP + 14;
 /// WebView2's controller is apartment-threaded (`PostWebMessageAsJson` from the worker fails with
 /// `E_INVALID_STATE`), so the worker hands the finished JSON to the window procedure instead.
 pub const REPLY: u32 = WM_APP + 13;
+
+/// Window timer that advances the first-show slide; the window owns only this one timer.
+const REVEAL_TIMER: usize = 1;
 
 /// Where the window should sit, in device-independent pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -265,14 +276,39 @@ pub fn placement(rect: RECT, maximized: bool, scale: f64) -> Option<(Placement, 
 #[derive(Debug)]
 struct Setup {
     store: ConfigStore,
+    animations: AnimationSettings,
     scale: f64,
+    log: Option<LogHandle>,
+    start_maximized: bool,
+}
+
+/// One in-flight first-show slide.
+#[derive(Debug, Clone, Copy)]
+struct Reveal {
+    /// Where the window ends up, in screen pixels.
+    final_rect: RECT,
+    /// When the first frame was drawn.
+    started: Instant,
+    /// Total duration; zero never starts a slide.
+    duration_ms: u32,
+    /// Physical pixels between the starting and the final top edge.
+    distance_px: f64,
 }
 
 /// The per-window state, owned by the window procedure.
 #[derive(Debug)]
 struct State {
     store: ConfigStore,
+    animations: AnimationSettings,
     scale: f64,
+    log: Option<LogHandle>,
+    /// `Some` only while the first-show slide is running.
+    reveal: Option<Reveal>,
+    /// Whether [`maximize`] put the window on its work area. `IsZoomed` stays false for that path:
+    /// the window is sized by this process, not by `SW_MAXIMIZE`.
+    maximized: bool,
+    /// A saved state asks the first show to maximize after the WebView is attached.
+    start_maximized: bool,
     webview: Option<WebView>,
     /// The last rectangle the window had while it was neither maximized nor minimized, in screen
     /// pixels. Saving this instead of asking Windows on close is what keeps a maximized window's
@@ -320,13 +356,21 @@ pub fn system_scale() -> f64 {
     f64::from(dpi) / 96.0
 }
 
-/// Creates the window and shows it.
+/// Creates the window without showing it.
+///
+/// The caller attaches the WebView2 controller and then calls [`Window::reveal`], which is what
+/// keeps the first-show slide from exposing an empty window.
 ///
 /// # Errors
 ///
 /// [`WindowError::Class`] when the class cannot be registered, [`WindowError::Create`] when the
 /// window cannot be created.
-pub fn create(settings: &WindowSettings, store: ConfigStore) -> Result<Window, WindowError> {
+pub fn create(
+    settings: &WindowSettings,
+    animations: AnimationSettings,
+    store: ConfigStore,
+    log: Option<LogHandle>,
+) -> Result<Window, WindowError> {
     let scale = system_scale();
     let placement = resolve(settings, Screen::primary(scale));
     let (left, top, width, height) = placement.to_physical(scale);
@@ -335,8 +379,17 @@ pub fn create(settings: &WindowSettings, store: ConfigStore) -> Result<Window, W
 
     let class = wide(CLASS_NAME);
     let title = wide(TITLE);
-    let setup = Box::into_raw(Box::new(Setup { store, scale }));
+    let setup = Box::into_raw(Box::new(Setup {
+        store,
+        animations,
+        scale,
+        log,
+        start_maximized: settings.maximized,
+    }));
 
+    // A frameless popup with a sizing border: the dashboard draws the title bar, and the page's
+    // `window.toggleMaximize` reaches [`maximize`] instead of `SW_MAXIMIZE`.
+    //
     // SAFETY: both strings are NUL-terminated and outlive the call; `setup` is a heap value that
     // `WM_NCCREATE` takes ownership of, or that is reclaimed below when the call fails.
     let created = unsafe {
@@ -365,12 +418,7 @@ pub fn create(settings: &WindowSettings, store: ConfigStore) -> Result<Window, W
         }
     };
 
-    // SAFETY: `hwnd` is a live window of this process, created on this thread.
-    unsafe {
-        dark_title_bar(hwnd);
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
-    }
+    dark_title_bar(hwnd);
 
     Ok(Window { hwnd })
 }
@@ -379,6 +427,106 @@ impl Window {
     /// The raw handle, which the WebView needs.
     pub fn hwnd(&self) -> HWND {
         self.hwnd
+    }
+
+    /// Shows the window, sliding it up over [`show_animation::BASE_DURATION_MS`] unless the user
+    /// disabled animations (or set a zero duration, which [`AnimationSettings::scaled_ms`] folds
+    /// into the same answer).
+    ///
+    /// Call this once, after the WebView has been attached: the window stays hidden until then, so
+    /// the slide never uncovers an empty frame.
+    pub fn reveal(&self) {
+        let Some(state) = state_of(self.hwnd) else {
+            return;
+        };
+
+        let mut final_rect = RECT::default();
+        // SAFETY: `hwnd` is live and `final_rect` is a valid out-parameter.
+        if unsafe { GetWindowRect(self.hwnd, &mut final_rect) }.is_err() {
+            // SAFETY: the handle is live; showing it is still better than leaving it hidden.
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_SHOW);
+                let _ = SetForegroundWindow(self.hwnd);
+            }
+            return;
+        }
+
+        // A window restored maximized has no room to slide: it would uncover the work area at the
+        // bottom and then jump into place. Show it at its final size instead.
+        if state.start_maximized {
+            maximize(self.hwnd, state);
+
+            // SAFETY: `hwnd` is live; showing a window sized to its work area is the whole point.
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_SHOW);
+                let _ = SetForegroundWindow(self.hwnd);
+            }
+
+            log_line(
+                state.log.as_ref(),
+                Level::Info,
+                "show animation: skipped, restoring a maximized window",
+            );
+            return;
+        }
+
+        let duration_ms = show_animation::duration_ms(&state.animations);
+        let distance_px = show_animation::distance_px(state.scale);
+
+        if duration_ms == 0 || distance_px <= 0.0 {
+            log_line(
+                state.log.as_ref(),
+                Level::Info,
+                "show animation: disabled by config, showing immediately",
+            );
+
+            // SAFETY: `hwnd` is live and the command is a documented constant.
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_SHOW);
+                let _ = SetForegroundWindow(self.hwnd);
+            }
+            return;
+        }
+
+        let start_top = final_rect.top + distance_px.round() as i32;
+        state.reveal = Some(Reveal {
+            final_rect,
+            started: Instant::now(),
+            duration_ms,
+            distance_px,
+        });
+
+        log_line(
+            state.log.as_ref(),
+            Level::Info,
+            &format!(
+                "show animation: sliding {distance_px:.0} px over {duration_ms} ms \
+                 ({} frames planned)",
+                show_animation::frames(duration_ms, distance_px).len()
+            ),
+        );
+
+        // SAFETY: `hwnd` is live; the rectangle is the final one shifted down by the slide
+        // distance, and the window has not been shown yet so there is no visible jump.
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                final_rect.left,
+                start_top,
+                final_rect.right - final_rect.left,
+                final_rect.bottom - final_rect.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            let _ = ShowWindow(self.hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(self.hwnd);
+            SetTimer(
+                Some(self.hwnd),
+                REVEAL_TIMER,
+                show_animation::FRAME_INTERVAL_MS,
+                None,
+            );
+        }
     }
 
     /// The handle as an `isize`, the form [`crate::bridge::Context`] carries across threads.
@@ -427,6 +575,119 @@ impl Window {
     }
 }
 
+/// The work area of the monitor the window is on, in physical pixels.
+fn work_area(hwnd: HWND) -> Option<RECT> {
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..MONITORINFO::default()
+    };
+
+    // SAFETY: `hwnd` is live; the nearest-monitor fallback always returns a monitor handle.
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    // SAFETY: `info` is a valid out-parameter initialised with its own size above.
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return None;
+    }
+
+    let work = info.rcWork;
+    (work.right > work.left && work.bottom > work.top).then_some(work)
+}
+
+/// Sizes the window to its monitor's work area, remembering the rectangle to restore to.
+///
+/// `SW_MAXIMIZE` is not used: this window is a `WS_POPUP`, and Windows maximizes a popup over the
+/// whole monitor, which puts the page's title bar under ProjectNeb's own reserved bar.
+fn maximize(hwnd: HWND, state: &mut State) {
+    if !state.maximized {
+        let mut current = RECT::default();
+        // SAFETY: `hwnd` is live and `current` is a valid out-parameter.
+        if unsafe { GetWindowRect(hwnd, &mut current) }.is_ok()
+            && current.right > current.left
+            && current.bottom > current.top
+        {
+            state.normal = Some(current);
+        }
+    }
+
+    let Some(work) = work_area(hwnd) else {
+        // A monitor that cannot describe itself is still better maximized by Windows than not at
+        // all; the title bar risk is preferable to a button that does nothing.
+        // SAFETY: `hwnd` is live and the command is a documented constant.
+        unsafe {
+            let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_MAXIMIZE);
+        }
+        state.maximized = true;
+        publish_window_state(state, true);
+        return;
+    };
+
+    // Set the flag before the move: the resulting `WM_SIZE` must not overwrite the normal
+    // rectangle with the work-area rectangle.
+    state.maximized = true;
+
+    // SAFETY: `hwnd` is live and `work` is a well-formed screen rectangle.
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            work.left,
+            work.top,
+            work.right - work.left,
+            work.bottom - work.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+
+    log_line(
+        state.log.as_ref(),
+        Level::Info,
+        &format!(
+            "window: maximized to the work area {}x{} at {},{}",
+            work.right - work.left,
+            work.bottom - work.top,
+            work.left,
+            work.top
+        ),
+    );
+    publish_window_state(state, true);
+}
+
+/// Returns the window to the rectangle it had before [`maximize`].
+fn restore(hwnd: HWND, state: &mut State) {
+    // SAFETY: `hwnd` is live; `SW_RESTORE` is harmless for a window that is not minimized.
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+    }
+
+    state.maximized = false;
+
+    if let Some(rect) = state.normal {
+        // SAFETY: `hwnd` is live and `rect` is the last user-chosen rectangle.
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    publish_window_state(state, false);
+}
+
+/// Tells the page which glyph the maximize button should show.
+fn publish_window_state(state: &State, maximized: bool) {
+    if let Some(webview) = &state.webview {
+        let message =
+            format!(r#"{{"type":"neb.windowState","payload":{{"maximized":{maximized}}}}}"#);
+        let _ = webview.post_json(&message);
+    }
+}
+
 /// Saves the window rectangle into `config.json`, merging with whatever the file holds now.
 fn save_bounds(hwnd: HWND, state: &mut State) {
     if state.saved {
@@ -449,7 +710,7 @@ fn save_bounds(hwnd: HWND, state: &mut State) {
     };
 
     // SAFETY: `hwnd` is live; `IsZoomed` only reads its placement.
-    let maximized = unsafe { IsZoomed(hwnd).as_bool() };
+    let maximized = state.maximized || unsafe { IsZoomed(hwnd).as_bool() };
 
     let Some((placement, maximized)) = placement(rect, maximized, state.scale) else {
         return;
@@ -469,6 +730,13 @@ fn save_bounds(hwnd: HWND, state: &mut State) {
 
 /// Remembers the current rectangle, but only while the window is in its normal state.
 fn remember_bounds(hwnd: HWND, state: &mut State) {
+    // A frame of the first-show slide is not a user-chosen rectangle; saving it would make the
+    // next launch open a few pixels lower than the one the user left. The work-area rectangle of
+    // a custom maximized window is not one either.
+    if state.reveal.is_some() || state.maximized {
+        return;
+    }
+
     // SAFETY: `hwnd` is live; both queries only read its placement.
     if unsafe { IsZoomed(hwnd).as_bool() || IsIconic(hwnd).as_bool() } {
         return;
@@ -492,6 +760,13 @@ fn state_of(hwnd: HWND) -> Option<&'static mut State> {
     // SAFETY: the pointer is either null or the box `WM_NCCREATE` leaked into the slot; it stays
     // valid until `WM_NCDESTROY` clears the slot and frees it.
     unsafe { pointer.as_mut() }
+}
+
+/// Writes one line when logging came up; a missing log must never stop the window animation.
+fn log_line(log: Option<&LogHandle>, level: Level, message: &str) {
+    if let Some(log) = log {
+        log.log(level, "app", message);
+    }
 }
 
 /// `DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, TRUE)`.
@@ -533,7 +808,12 @@ unsafe extern "system" fn window_proc(
             let setup = unsafe { *Box::from_raw(setup) };
             let state = Box::new(State {
                 store: setup.store,
+                animations: setup.animations,
                 scale: setup.scale,
+                log: setup.log,
+                reveal: None,
+                maximized: false,
+                start_maximized: setup.start_maximized,
                 webview: None,
                 normal: None,
                 saved: false,
@@ -576,6 +856,43 @@ unsafe extern "system" fn window_proc(
 
             LRESULT(0)
         }
+        WM_SYSCOMMAND => {
+            // Win+Up, the window menu and a double-click on the native border all arrive here.
+            // Everything outside the command mask (SC_CLOSE, SC_KEYMENU, the system menu flags)
+            // stays with `DefWindowProcW`.
+            let command = wparam.0 as u32 & 0xFFF0;
+
+            if let Some(state) = state_of(hwnd) {
+                if command == SC_MAXIMIZE {
+                    maximize(hwnd, state);
+                    return LRESULT(0);
+                }
+
+                if command == SC_RESTORE {
+                    if state.maximized {
+                        restore(hwnd, state);
+                    } else {
+                        // SAFETY: `hwnd` is live and this is the ordinary un-minimize path.
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                        }
+                    }
+
+                    return LRESULT(0);
+                }
+
+                if command == SC_MINIMIZE {
+                    // SAFETY: `hwnd` is live and the command is a documented constant.
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_MINIMIZE);
+                    }
+                    return LRESULT(0);
+                }
+            }
+
+            // SAFETY: unhandled system commands belong to `DefWindowProcW`.
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
         WM_SIZE => {
             if let Some(state) = state_of(hwnd) {
                 remember_bounds(hwnd, state);
@@ -603,25 +920,88 @@ unsafe extern "system" fn window_proc(
         }
         WM_DPICHANGED => {
             if let Some(state) = state_of(hwnd) {
+                // A slide planned for the old scale no longer has the right distance; the window is
+                // already visible, so cancelling it at the suggested rectangle is the honest answer.
+                if state.reveal.is_some() {
+                    // SAFETY: the timer id came from `SetTimer` on this window.
+                    unsafe {
+                        let _ = KillTimer(Some(hwnd), REVEAL_TIMER);
+                    }
+                    state.reveal = None;
+                }
+
                 // SAFETY: `hwnd` is live; the DPI of a live window is always at least 96.
                 let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
                 state.scale = f64::from(dpi) / 96.0;
 
-                // Windows suggests the rectangle the window should take at the new scale.
-                // SAFETY: `lparam` is the suggested `RECT` for this message.
-                let suggested = unsafe { &*(lparam.0 as *const RECT) };
-                // SAFETY: the suggested rectangle is a well-formed screen rectangle.
+                if state.maximized {
+                    // The new monitor has its own work area; keep the saved normal rectangle so
+                    // restore still returns to the user's size rather than to the old maximum.
+                    let normal = state.normal;
+                    state.maximized = false;
+                    maximize(hwnd, state);
+                    state.normal = normal;
+                } else {
+                    // Windows suggests the rectangle the window should take at the new scale.
+                    // SAFETY: `lparam` is the suggested `RECT` for this message.
+                    let suggested = unsafe { &*(lparam.0 as *const RECT) };
+                    // SAFETY: the suggested rectangle is a well-formed screen rectangle.
+                    unsafe {
+                        let _ = SetWindowPos(
+                            hwnd,
+                            None,
+                            suggested.left,
+                            suggested.top,
+                            suggested.right - suggested.left,
+                            suggested.bottom - suggested.top,
+                            SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
+                    }
+                }
+            }
+
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == REVEAL_TIMER => {
+            if let Some(state) = state_of(hwnd)
+                && let Some(reveal) = state.reveal
+            {
+                let elapsed_ms =
+                    u32::try_from(reveal.started.elapsed().as_millis()).unwrap_or(u32::MAX);
+                let offset =
+                    show_animation::offset_px(reveal.duration_ms, elapsed_ms, reveal.distance_px);
+                let finished = elapsed_ms >= reveal.duration_ms;
+
+                // SAFETY: `hwnd` is live and the rectangle is a well-formed screen rectangle.
                 unsafe {
-                    let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                    let _ = SetWindowPos(
                         hwnd,
                         None,
-                        suggested.left,
-                        suggested.top,
-                        suggested.right - suggested.left,
-                        suggested.bottom - suggested.top,
-                        windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
-                            | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
+                        reveal.final_rect.left,
+                        reveal.final_rect.top + offset.round() as i32,
+                        reveal.final_rect.right - reveal.final_rect.left,
+                        reveal.final_rect.bottom - reveal.final_rect.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
                     );
+                }
+
+                if finished {
+                    // SAFETY: `hwnd` is live and the timer id came from `SetTimer` on this window.
+                    unsafe {
+                        let _ = KillTimer(Some(hwnd), REVEAL_TIMER);
+                    }
+                    state.reveal = None;
+
+                    log_line(
+                        state.log.as_ref(),
+                        Level::Info,
+                        "show animation: finished, window at its stored rectangle",
+                    );
+                }
+            } else {
+                // SAFETY: a stale timer id belongs to this window; killing it is harmless.
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), REVEAL_TIMER);
                 }
             }
 
@@ -629,6 +1009,14 @@ unsafe extern "system" fn window_proc(
         }
         WM_CLOSE => {
             if let Some(state) = state_of(hwnd) {
+                if state.reveal.is_some() {
+                    // SAFETY: the timer id came from `SetTimer` on this window.
+                    unsafe {
+                        let _ = KillTimer(Some(hwnd), REVEAL_TIMER);
+                    }
+                    state.reveal = None;
+                }
+
                 save_bounds(hwnd, state);
             }
 
@@ -657,14 +1045,14 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         TOGGLE_MAXIMIZE => {
-            // SAFETY: `hwnd` is live; `IsZoomed` only reads its placement.
-            let maximized =
-                unsafe { windows::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd).as_bool() };
-
-            // SAFETY: `hwnd` is live and the commands are documented constants.
-            unsafe {
-                let _ = ShowWindow(hwnd, if maximized { SW_RESTORE } else { SW_MAXIMIZE });
+            if let Some(state) = state_of(hwnd) {
+                if state.maximized {
+                    restore(hwnd, state);
+                } else {
+                    maximize(hwnd, state);
+                }
             }
+
             LRESULT(0)
         }
         START_DRAG => {
@@ -700,10 +1088,15 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: the pointer is the box `post_reply` leaked for this one message.
                 let message = unsafe { *Box::from_raw(pointer) };
 
-                if let Some(state) = state_of(hwnd)
-                    && let Some(webview) = &state.webview
-                {
-                    let _ = webview.post_json(&message);
+                if let Some(state) = state_of(hwnd) {
+                    if let Some(webview) = &state.webview {
+                        let _ = webview.post_json(&message);
+                    }
+
+                    // A reply means the page is alive. Repeating the window state here is what
+                    // makes the glyph correct when the window opened maximized before the page
+                    // installed its listeners (metrics replies arrive once a second).
+                    publish_window_state(state, state.maximized);
                 }
             }
 

@@ -20,6 +20,7 @@
 //! next to it, the first immediately after the page says `neb.ui.ready`. The worker owns the CPU
 //! sampler and the supervisor probe, so the page never polls for numbers.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, SystemTime};
@@ -31,9 +32,8 @@ use neb_core::ipc::IpcError;
 use neb_core::license::{account as account_api, ids, loopback, store};
 use neb_core::logging::{Level, LogHandle};
 use neb_core::metrics::Sampler;
-use serde_json::{Value, json};
-
-use crate::themes::{self, ThemeDoc};
+use neb_core::theming::{self, Profile, ProfileStore, Theme, ThemeStore};
+use serde_json::{Map, Value, json};
 
 /// Message type the dashboard sends.
 pub const INVOKE_TYPE: &str = "neb.invoke";
@@ -227,6 +227,8 @@ pub struct Context {
     pub store: ConfigStore,
     /// Folder `themes.save` writes into.
     pub themes_dir: PathBuf,
+    /// Folder named profiles live in.
+    pub profiles_dir: PathBuf,
     /// Window the `window.*` methods act on; `None` in tests and before the window exists.
     pub window: Option<isize>,
     /// Pipe the `shell.*` methods call.
@@ -268,12 +270,14 @@ impl Context {
     pub fn new(
         store: ConfigStore,
         themes_dir: PathBuf,
+        profiles_dir: PathBuf,
         window: Option<isize>,
         log: Option<LogHandle>,
     ) -> Self {
         Self {
             store,
             themes_dir,
+            profiles_dir,
             window,
             shell_pipe: SHELL_PIPE.to_owned(),
             supervisor_pipe: SUPERVISOR_PIPE.to_owned(),
@@ -303,6 +307,7 @@ impl Context {
         Self {
             store: ConfigStore::new(root.join("config.json")),
             themes_dir: root.join("themes"),
+            profiles_dir: root.join("profiles"),
             window: None,
             shell_pipe: unused(SHELL_PIPE),
             supervisor_pipe: unused(SUPERVISOR_PIPE),
@@ -540,6 +545,11 @@ fn dispatch_inner(context: &Context, job: &Job) -> Result<Value, MethodError> {
         "config.set" => set_config(context, &job.params),
         "themes.list" => Ok(list_themes(context)),
         "themes.save" => save_theme(context, &job.params),
+        "themes.apply" => apply_theme(context, &job.params),
+        "profiles.list" => Ok(list_profiles(context)),
+        "profiles.save" => save_profile(context, &job.params),
+        "profiles.apply" => apply_profile(context, &job.params),
+        "profiles.delete" => delete_profile(context, &job.params),
         "shell.reload" => shell_call(context, "shell.reload"),
         "shell.getState" => Ok(shell_state(context)),
         "app.version" => Ok(json!({
@@ -821,27 +831,15 @@ fn sane(value: f64, fallback: f64) -> f64 {
     }
 }
 
-/// `themes.list`: the shipped palettes, then the user's files.
+/// `themes.list`: the six presets compiled into `neb-core`, then the user's files.
+///
+/// Each entry is the package the Appearance screen draws: `{id, name, description, builtin,
+/// tokens}`. Tokens are the validated package tokens (`opacity` is `0.4..=1.0`, `barHeight` and
+/// `dockTile` are device-independent pixels), which is also what `themes.apply` answers with.
 fn list_themes(context: &Context) -> Value {
     let config = context.store.load();
-    let shipped = themes::built_in();
-    let themes: Vec<Value> = themes::list(&context.themes_dir)
-        .into_iter()
-        .map(|theme| {
-            // A user file may reuse a shipped id; then it is the user's palette, not the build's.
-            let built_in = theme.is_shipped(&shipped);
-            let mut value = serde_json::to_value(&theme).unwrap_or(Value::Null);
-            if let Value::Object(object) = &mut value {
-                object.insert("builtIn".to_owned(), Value::Bool(built_in));
-                // The dashboard's reader names the corner radius `radius`; the file keeps the C#
-                // spelling. Both travel so an older and a newer bundle read the same file.
-                if let Some(radius) = object.get("cornerRadius").cloned() {
-                    object.insert("radius".to_owned(), radius);
-                }
-            }
-            value
-        })
-        .collect();
+    let store = ThemeStore::new(context.themes_dir.clone());
+    let themes: Vec<Value> = store.list().iter().map(theme_entry).collect();
 
     json!({
         "themes": themes,
@@ -850,20 +848,41 @@ fn list_themes(context: &Context) -> Value {
     })
 }
 
-/// `themes.save`: validates the document, then writes it next to the shell's other themes.
-fn save_theme(context: &Context, params: &Value) -> Result<Value, MethodError> {
-    let document = match params.get("theme") {
-        Some(theme) => theme,
-        None => params,
-    };
+/// One listed theme in the shape the dashboard reads.
+fn theme_entry(theme: &Theme) -> Value {
+    json!({
+        "id": theme.id,
+        "name": theme.name,
+        "description": theme.description,
+        "builtin": theming::is_builtin(&theme.id),
+        "tokens": theme_tokens(theme),
+    })
+}
 
-    let theme: ThemeDoc = themes::parse_document(&flatten_theme(document), "")
-        .map_err(|error| format!("themes.save: {error}"))?;
+/// The package token object, exactly as it would be exported.
+fn theme_tokens(theme: &Theme) -> Value {
+    theme
+        .to_value()
+        .get("tokens")
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+}
 
-    let path = themes::save(&context.themes_dir, &theme)
-        .map_err(|error| format!("cannot save the theme: {error}"))?;
+/// `themes.apply`: resolve a preset or user theme, put its tokens where the shell reads them and
+/// make it the active theme.
+///
+/// The shell's `ThemeTokens::load` falls back to the compiled-in presets, but it reads a file first;
+/// writing the resolved package into `themes/<id>.json` keeps a hand-edited theme and a preset on
+/// the same path. A missing shell is not an error: the config is saved and the next start paints it.
+fn apply_theme(context: &Context, params: &Value) -> Result<Value, MethodError> {
+    let id = required_id(params)?;
+    let store = ThemeStore::new(context.themes_dir.clone());
+    let theme = store
+        .get(id)
+        .ok_or_else(|| format!("theme '{id}' was not found"))?;
 
-    // Saving a palette in the Appearance screen is also choosing it: the bar reloads this id.
+    let path = persist_theme(context, &theme)?;
+
     let mut config = context
         .store
         .load_checked()
@@ -874,39 +893,369 @@ fn save_theme(context: &Context, params: &Value) -> Result<Value, MethodError> {
         .save(&config)
         .map_err(|error| format!("cannot save the config: {error}"))?;
 
+    let reloaded = shell_call(context, "shell.reload").is_ok();
+    context.log(
+        Level::Info,
+        &format!(
+            "themes.apply '{}' -> {} (reloaded {reloaded})",
+            theme.id,
+            path.display()
+        ),
+    );
+
     Ok(json!({
-        "saved": path.display().to_string(),
-        "theme": theme,
+        "id": theme.id,
+        "name": theme.name,
+        "tokens": theme_tokens(&theme),
+        "active": config.shell.theme_id,
+        "file": path.display().to_string(),
+        "reloaded": reloaded,
+    }))
+}
+
+/// Writes `theme` to `themes/<id>.json` through a temporary file and a rename.
+fn persist_theme(context: &Context, theme: &Theme) -> Result<PathBuf, MethodError> {
+    fs::create_dir_all(&context.themes_dir)
+        .map_err(|error| format!("cannot create '{}': {error}", context.themes_dir.display()))?;
+
+    let text = theme
+        .to_pretty_json()
+        .map_err(|error| format!("cannot render the theme: {error}"))?;
+    let path = context.themes_dir.join(format!("{}.json", theme.id));
+    let tmp = context
+        .themes_dir
+        .join(format!("{}.json.tmp-{}", theme.id, std::process::id()));
+
+    fs::write(&tmp, text.as_bytes())
+        .map_err(|error| format!("cannot write '{}': {error}", tmp.display()))?;
+
+    if let Err(error) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("cannot write '{}': {error}", path.display()));
+    }
+
+    Ok(path)
+}
+
+/// The `id` every theme/profile method names, trimmed and non-empty.
+fn required_id(params: &Value) -> Result<&str, MethodError> {
+    params
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "the call needs a non-empty 'id'".to_owned())
+}
+
+/// `themes.save`: validates the editor document, writes it as a package, then makes it active.
+///
+/// The editor sends `{id, name, colors: {...}, radius, opacity, font, barHeight, dockTileSize}`;
+/// a package document (`{..., tokens: {...}}`) is accepted unchanged. Saving an edited preset
+/// cannot overwrite the compiled-in palette, so it lands under a fresh `<id>-custom` id.
+fn save_theme(context: &Context, params: &Value) -> Result<Value, MethodError> {
+    let document = params.get("theme").unwrap_or(params);
+    let store = ThemeStore::new(context.themes_dir.clone());
+    let mut theme = theme_from_editor(document)?;
+
+    if theming::is_builtin(&theme.id) {
+        theme.id = available_theme_id(&store, &theme.id);
+        theme.tokens.id = theme.id.clone();
+    }
+
+    let text = theme
+        .to_pretty_json()
+        .map_err(|error| format!("themes.save: {error}"))?;
+    let saved = store
+        .import(&text)
+        .map_err(|error| format!("themes.save: {error}"))?;
+
+    // Saving a palette in the Appearance screen is also choosing it: the bar reloads this id.
+    let mut config = context
+        .store
+        .load_checked()
+        .map_err(|error| format!("cannot read the config: {error}"))?;
+    config.shell.theme_id = saved.id.clone();
+    context
+        .store
+        .save(&config)
+        .map_err(|error| format!("cannot save the config: {error}"))?;
+
+    Ok(json!({
+        "saved": context.themes_dir.join(format!("{}.json", saved.id)).display().to_string(),
+        "theme": theme_entry(&saved),
         "active": config.shell.theme_id,
     }))
 }
 
-/// Flattens the dashboard's theme document (`{colors: {...}, radius}`) into the on-disk shape.
-///
-/// The C# theme store and this crate's files keep the seven colours at the top level; the editor
-/// groups them under `colors` and names the corner radius `radius`. Both spellings are accepted so
-/// the same save button works against either host.
-fn flatten_theme(document: &Value) -> Value {
-    let Some(object) = document.as_object() else {
-        return document.clone();
-    };
-
-    let Some(colors) = object.get("colors").and_then(Value::as_object) else {
-        return document.clone();
-    };
-
-    let mut flat = object.clone();
-    for (key, value) in colors {
-        flat.entry(key.clone()).or_insert_with(|| value.clone());
+/// A `custom`-suffixed id that no preset or user file owns yet.
+fn available_theme_id(store: &ThemeStore, base: &str) -> String {
+    let base = format!("{base}-custom");
+    if !store.contains(&base) {
+        return base;
     }
 
-    if !flat.contains_key("cornerRadius")
-        && let Some(radius) = object.get("radius")
+    for suffix in 2.. {
+        let candidate = format!("{base}-{suffix}");
+        if !store.contains(&candidate) {
+            return candidate;
+        }
+    }
+
+    unreachable!("the counter is unbounded")
+}
+
+/// Reads the editor's theme document or a full package into a validated [`Theme`].
+fn theme_from_editor(document: &Value) -> Result<Theme, MethodError> {
+    if document.get("tokens").is_some() {
+        return Theme::from_value(document, None).map_err(|error| format!("themes.save: {error}"));
+    }
+
+    let object = document
+        .as_object()
+        .ok_or_else(|| "themes.save: a theme must be a json object".to_owned())?;
+    let colors = object.get("colors").and_then(Value::as_object);
+
+    let mut tokens = Map::new();
+    for key in [
+        "background",
+        "surface",
+        "stroke",
+        "text",
+        "textDim",
+        "accent",
+        "accent2",
+    ] {
+        let value = colors
+            .and_then(|colors| colors.get(key))
+            .or_else(|| object.get(key))
+            .cloned()
+            .ok_or_else(|| format!("themes.save: '{key}' is required"))?;
+        tokens.insert(key.to_owned(), value);
+    }
+
+    if let Some(radius) = object.get("radius").or_else(|| object.get("cornerRadius")) {
+        tokens.insert("radius".to_owned(), radius.clone());
+    }
+
+    if let Some(opacity) = object.get("opacity") {
+        let value = opacity
+            .as_f64()
+            .ok_or_else(|| "themes.save: 'opacity' must be a number".to_owned())?;
+        // The editor speaks percent, the package speaks a fraction.
+        let fraction = if value > 1.0 { value / 100.0 } else { value };
+        let clamped = fraction.clamp(f64::from(theming::PACKAGE_MIN_OPACITY), 1.0);
+        tokens.insert(
+            "opacity".to_owned(),
+            Value::from((clamped * 1_000.0).round() / 1_000.0),
+        );
+    }
+
+    if let Some(blur) = object.get("blur") {
+        tokens.insert("blur".to_owned(), blur.clone());
+    }
+
+    if let Some(font) = object.get("font") {
+        tokens.insert("font".to_owned(), font.clone());
+    }
+
+    if let Some(height) = object.get("barHeight").or_else(|| object.get("bar_height")) {
+        let height = height
+            .as_i64()
+            .ok_or_else(|| "themes.save: 'barHeight' must be a whole number".to_owned())?;
+        tokens.insert(
+            "barHeight".to_owned(),
+            Value::from(height.clamp(
+                i64::from(theming::PACKAGE_MIN_THEME_BAR_HEIGHT),
+                i64::from(theming::PACKAGE_MAX_THEME_BAR_HEIGHT),
+            )),
+        );
+    }
+
+    if let Some(tile) = object
+        .get("dockTile")
+        .or_else(|| object.get("dockTileSize"))
+        .or_else(|| object.get("dock_tile_size"))
     {
-        flat.insert("cornerRadius".to_owned(), radius.clone());
+        let tile = tile
+            .as_i64()
+            .ok_or_else(|| "themes.save: 'dockTile' must be a whole number".to_owned())?;
+        tokens.insert(
+            "dockTile".to_owned(),
+            Value::from(tile.clamp(
+                i64::from(theming::PACKAGE_MIN_DOCK_TILE),
+                i64::from(theming::PACKAGE_MAX_DOCK_TILE),
+            )),
+        );
     }
 
-    Value::Object(flat)
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .unwrap_or("custom");
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(id);
+    let description = object
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    Theme::from_value(
+        &json!({
+            "schemaVersion": theming::PACKAGE_SCHEMA_VERSION,
+            "id": id,
+            "name": name,
+            "description": description,
+            "tokens": Value::Object(tokens),
+        }),
+        Some(id),
+    )
+    .map_err(|error| format!("themes.save: {error}"))
+}
+
+/// The named profile store for this window.
+fn profile_store(context: &Context) -> ProfileStore {
+    ProfileStore::new(context.profiles_dir.clone())
+}
+
+/// `profiles.list`: every readable profile, plus the folder they live in.
+fn list_profiles(context: &Context) -> Value {
+    let store = profile_store(context);
+    json!({
+        "profiles": store.list().iter().map(profile_entry).collect::<Vec<_>>(),
+        "dir": store.dir().display().to_string(),
+    })
+}
+
+/// One profile as the dashboard reads it: the file's own camelCase document.
+fn profile_entry(profile: &Profile) -> Value {
+    serde_json::to_value(profile).unwrap_or(Value::Null)
+}
+
+/// `profiles.save`: captures the current theme and shell settings under `name`.
+///
+/// Reusing an existing profile name updates that file instead of creating a second one; any other
+/// name gets a stable ASCII id (Cyrillic names use a hash so the same name always maps to the same
+/// file).
+fn save_profile(context: &Context, params: &Value) -> Result<Value, MethodError> {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "'profiles.save' needs a non-empty 'name'".to_owned())?;
+    if name.chars().count() > 80 {
+        return Err("'profiles.save': the name is longer than 80 characters".to_owned());
+    }
+
+    let config = context
+        .store
+        .load_checked()
+        .map_err(|error| format!("cannot read the config: {error}"))?;
+    let store = profile_store(context);
+    let existing = store.list();
+    let id = profile_id(name, &existing);
+    let profile = Profile::capture(id, name, &config);
+    let path = store
+        .save(&profile)
+        .map_err(|error| format!("profiles.save: {error}"))?;
+
+    Ok(json!({
+        "saved": path.display().to_string(),
+        "profile": profile_entry(&profile),
+        "profiles": store.list().iter().map(profile_entry).collect::<Vec<_>>(),
+    }))
+}
+
+/// A file-safe id for `name`, reusing the id of a profile with the same name.
+fn profile_id(name: &str, existing: &[Profile]) -> String {
+    if let Some(profile) = existing
+        .iter()
+        .find(|profile| profile.name.eq_ignore_ascii_case(name))
+    {
+        return profile.id.clone();
+    }
+
+    let mut slug = String::new();
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+
+    let slug = slug.trim_matches('-');
+    let base = if slug.is_empty() {
+        format!("profile-{:08x}", fnv1a(name))
+    } else {
+        slug.chars()
+            .take(48)
+            .collect::<String>()
+            .trim_end_matches('-')
+            .to_owned()
+    };
+
+    let mut id = base.clone();
+    let mut suffix = 2;
+    while existing.iter().any(|profile| profile.id == id) {
+        id = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+
+    id
+}
+
+/// FNV-1a, used only to turn a non-ASCII profile name into a stable id.
+fn fnv1a(text: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in text.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+
+    hash
+}
+
+/// `profiles.apply`: writes the profile's theme and shell settings into `config.json`, then asks
+/// the shell to reload. A missing shell is not an error; the next start reads the same file.
+fn apply_profile(context: &Context, params: &Value) -> Result<Value, MethodError> {
+    let id = required_id(params)?;
+    let store = profile_store(context);
+    let profile = store
+        .get(id)
+        .ok_or_else(|| format!("profile '{id}' was not found"))?;
+    let config = store
+        .apply_to_config(id, &context.store)
+        .map_err(|error| format!("profiles.apply: {error}"))?;
+    let reloaded = shell_call(context, "shell.reload").is_ok();
+
+    Ok(json!({
+        "id": profile.id,
+        "profile": profile_entry(&profile),
+        "config": config_payload(&config)?,
+        "active": config.shell.theme(),
+        "reloaded": reloaded,
+    }))
+}
+
+/// `profiles.delete`: removes one profile file.
+fn delete_profile(context: &Context, params: &Value) -> Result<Value, MethodError> {
+    let id = required_id(params)?;
+    let store = profile_store(context);
+    store
+        .delete(id)
+        .map_err(|error| format!("profiles.delete: {error}"))?;
+
+    Ok(json!({
+        "deleted": id,
+        "profiles": store.list().iter().map(profile_entry).collect::<Vec<_>>(),
+    }))
 }
 
 /// Calls the shell and returns its state document.
@@ -2981,33 +3330,60 @@ mod tests {
     }
 
     #[test]
-    fn themes_list_offers_the_shipped_palettes_first() {
+    fn themes_list_offers_the_six_presets_on_a_fresh_install() {
         let (_dir, context) = context();
 
         let reply = dispatch(&context, &job("themes.list", Value::Null));
 
         assert!(reply.ok, "{reply:?}");
         let themes = reply.payload["themes"].as_array().expect("array");
-        assert_eq!(themes.len(), 2);
-        assert_eq!(themes[0]["id"], json!("liquid-glass"));
-        assert_eq!(themes[0]["builtIn"], json!(true));
+        assert_eq!(themes.len(), 6, "every preset must be listed");
+        let ids: Vec<&str> = themes
+            .iter()
+            .map(|theme| theme["id"].as_str().expect("id"))
+            .collect();
+        assert_eq!(ids, neb_core::theming::BUILT_IN_IDS);
+
+        for theme in themes {
+            assert_eq!(theme["builtin"], json!(true), "{theme}");
+            assert!(
+                theme["description"]
+                    .as_str()
+                    .is_some_and(|description| !description.trim().is_empty()),
+                "the dashboard shows a description: {theme}"
+            );
+            assert_eq!(
+                theme["tokens"]["accent"].as_str().map(str::len),
+                Some(7),
+                "{theme}"
+            );
+            assert!(
+                theme["tokens"]["opacity"]
+                    .as_f64()
+                    .is_some_and(|opacity| (0.4..=1.0).contains(&opacity)),
+                "{theme}"
+            );
+        }
+
         assert_eq!(reply.payload["active"], json!(DEFAULT_THEME_ID));
     }
 
     #[test]
-    fn themes_save_writes_a_file_the_list_then_reads_back() {
+    fn themes_list_includes_the_user_themes_after_the_presets() {
         let (_dir, context) = context();
         let document = json!({
             "id": "sunset",
             "name": "Sunset",
-            "background": "#120A0B",
-            "surface": "#2A1518",
-            "stroke": "#40202A",
-            "text": "#FFF1EA",
-            "textDim": "#C9A9A1",
-            "accent": "#FF8A5C",
-            "accent2": "#FF4D6D",
-            "cornerRadius": 18
+            "colors": {
+                "background": "#120A0B",
+                "surface": "#2A1518",
+                "stroke": "#40202A",
+                "text": "#FFF1EA",
+                "textDim": "#C9A9A1",
+                "accent": "#FF8A5C",
+                "accent2": "#FF4D6D"
+            },
+            "radius": 18
         });
 
         let saved = dispatch(&context, &job("themes.save", json!({ "theme": document })));
@@ -3016,9 +3392,62 @@ mod tests {
 
         let listed = dispatch(&context, &job("themes.list", Value::Null));
         let themes = listed.payload["themes"].as_array().expect("array");
-        assert_eq!(themes.len(), 3);
-        assert_eq!(themes[2]["id"], json!("sunset"));
-        assert_eq!(themes[2]["builtIn"], json!(false));
+        assert_eq!(themes.len(), 7, "six presets then the user's file");
+        assert_eq!(themes[6]["id"], json!("sunset"));
+        assert_eq!(themes[6]["builtin"], json!(false));
+        assert_eq!(themes[6]["tokens"]["accent"], json!("#FF8A5C"));
+    }
+
+    #[test]
+    fn themes_apply_a_builtin_persists_its_tokens_and_the_active_id() {
+        let (_dir, context) = context();
+
+        let reply = dispatch(&context, &job("themes.apply", json!({ "id": "cyberpunk" })));
+
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload["id"], json!("cyberpunk"));
+        assert_eq!(reply.payload["tokens"]["accent"], json!("#FF2FB9"));
+        assert_eq!(reply.payload["tokens"]["accent2"], json!("#00F0FF"));
+        assert_eq!(reply.payload["active"], json!("cyberpunk"));
+        assert_eq!(
+            reply.payload["reloaded"],
+            json!(false),
+            "no shell listens in a test"
+        );
+
+        let config = context.store.load_checked().expect("readable");
+        assert_eq!(config.shell.theme_id, "cyberpunk");
+
+        let path = context.themes_dir.join("cyberpunk.json");
+        assert!(path.is_file(), "the shell reads tokens from this file");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let written = Theme::parse(&text, Some("cyberpunk")).expect("valid package");
+        assert_eq!(written.id, "cyberpunk");
+        assert_eq!(written.tokens.accent.red, 0xFF);
+        assert_eq!(written.tokens.accent.blue, 0xB9);
+
+        let listed = dispatch(&context, &job("themes.list", Value::Null));
+        let themes = listed.payload["themes"].as_array().expect("array");
+        assert_eq!(themes.len(), 6, "a copied preset is still the preset");
+        assert_eq!(themes[4]["builtin"], json!(true));
+    }
+
+    #[test]
+    fn themes_apply_refuses_an_unknown_id_without_writing() {
+        let (_dir, context) = context();
+
+        let reply = dispatch(&context, &job("themes.apply", json!({ "id": "absent" })));
+
+        assert!(!reply.ok);
+        assert!(
+            reply.error.unwrap_or_default().contains("not found"),
+            "the page needs a reason"
+        );
+        assert!(!context.themes_dir.join("absent.json").exists());
+        assert!(
+            !context.store.path().exists(),
+            "a failed apply must not write a config"
+        );
     }
 
     #[test]
@@ -3036,13 +3465,19 @@ mod tests {
                 "accent": "#FF8800",
                 "accent2": "#FF0088"
             },
-            "radius": 14
+            "radius": 14,
+            "opacity": 72,
+            "barHeight": 52,
+            "dockTileSize": 64
         });
 
         let reply = dispatch(&context, &job("themes.save", json!({ "theme": document })));
 
         assert!(reply.ok, "{reply:?}");
-        assert_eq!(reply.payload["theme"]["cornerRadius"], json!(14.0));
+        assert_eq!(reply.payload["theme"]["tokens"]["radius"], json!(14));
+        assert_eq!(reply.payload["theme"]["tokens"]["opacity"], json!(0.72));
+        assert_eq!(reply.payload["theme"]["tokens"]["barHeight"], json!(52));
+        assert_eq!(reply.payload["theme"]["tokens"]["dockTile"], json!(64));
         assert_eq!(reply.payload["active"], json!("custom"));
 
         let config = context.store.load_checked().expect("readable");
@@ -3054,8 +3489,44 @@ mod tests {
             .iter()
             .find(|theme| theme["id"] == json!("custom"))
             .expect("the saved theme is listed");
-        assert_eq!(custom["radius"], json!(14.0));
-        assert_eq!(custom["accent"], json!("#FF8800"));
+        assert_eq!(custom["builtin"], json!(false));
+        assert_eq!(custom["tokens"]["accent"], json!("#FF8800"));
+    }
+
+    #[test]
+    fn themes_save_copies_a_preset_instead_of_replacing_it() {
+        let (_dir, context) = context();
+        let document = json!({
+            "id": "nebula-glass",
+            "name": "Nebula Glass (mine)",
+            "colors": {
+                "background": "#0B0A12",
+                "surface": "#1E1A2E",
+                "stroke": "#2B2544",
+                "text": "#F6F4FF",
+                "textDim": "#B7B3C9",
+                "accent": "#A78BFA",
+                "accent2": "#7C5CFF"
+            },
+            "radius": 14
+        });
+
+        let reply = dispatch(&context, &job("themes.save", json!({ "theme": document })));
+
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload["active"], json!("nebula-glass-custom"));
+        assert_eq!(
+            reply.payload["theme"]["id"],
+            json!("nebula-glass-custom"),
+            "the preset id is the build's"
+        );
+
+        let listed = dispatch(&context, &job("themes.list", Value::Null));
+        let themes = listed.payload["themes"].as_array().expect("array");
+        assert_eq!(themes.len(), 7);
+        assert_eq!(themes[0]["id"], json!("nebula-glass"));
+        assert_eq!(themes[0]["builtin"], json!(true));
+        assert_eq!(themes[6]["builtin"], json!(false));
     }
 
     #[test]
@@ -3079,6 +3550,127 @@ mod tests {
         assert!(!reply.ok);
         assert!(reply.error.unwrap_or_default().contains("background"));
         assert!(!context.themes_dir.join("broken.json").exists());
+    }
+
+    #[test]
+    fn profiles_list_is_empty_on_a_fresh_install() {
+        let (_dir, context) = context();
+
+        let reply = dispatch(&context, &job("profiles.list", Value::Null));
+
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload["profiles"], json!([]));
+        assert!(
+            reply.payload["dir"]
+                .as_str()
+                .is_some_and(|dir| dir.ends_with("profiles")),
+            "{reply:?}"
+        );
+    }
+
+    #[test]
+    fn profiles_save_then_apply_restores_the_theme_and_shell_settings() {
+        let (_dir, context) = context();
+
+        let mut config = context.store.load_checked().expect("defaults");
+        config.shell.theme_id = "cyberpunk".to_owned();
+        config.shell.bar_height = 48;
+        config.shell.dock_auto_hide = false;
+        config.shell.pinned_apps = vec![r"C:\Apps\editor.exe".to_owned()];
+        context.store.save(&config).expect("seed config");
+
+        let saved = dispatch(&context, &job("profiles.save", json!({ "name": "Night" })));
+        assert!(saved.ok, "{saved:?}");
+        assert_eq!(saved.payload["profile"]["id"], json!("night"));
+        assert_eq!(saved.payload["profile"]["themeId"], json!("cyberpunk"));
+        assert_eq!(saved.payload["profile"]["shell"]["barHeight"], json!(48));
+        assert!(context.profiles_dir.join("night.json").is_file());
+        assert_eq!(saved.payload["profiles"].as_array().map(Vec::len), Some(1));
+
+        let mut other = context.store.load_checked().expect("readable");
+        other.shell.theme_id = "minimal-dark".to_owned();
+        other.shell.bar_height = 32;
+        other.shell.dock_auto_hide = true;
+        context.store.save(&other).expect("switch theme");
+
+        let applied = dispatch(&context, &job("profiles.apply", json!({ "id": "night" })));
+        assert!(applied.ok, "{applied:?}");
+        assert_eq!(applied.payload["id"], json!("night"));
+        assert_eq!(applied.payload["active"], json!("cyberpunk"));
+        assert_eq!(
+            applied.payload["config"]["shell"]["themeId"],
+            json!("cyberpunk")
+        );
+        assert_eq!(applied.payload["config"]["shell"]["barHeight"], json!(48));
+        assert_eq!(applied.payload["reloaded"], json!(false));
+
+        let config = context.store.load_checked().expect("readable");
+        assert_eq!(config.shell.theme_id, "cyberpunk");
+        assert_eq!(config.shell.bar_height, 48);
+        assert!(!config.shell.dock_auto_hide);
+        assert_eq!(config.shell.pinned_apps, vec![r"C:\Apps\editor.exe"]);
+    }
+
+    #[test]
+    fn profiles_delete_removes_the_file_and_a_second_delete_is_an_error() {
+        let (_dir, context) = context();
+        dispatch(&context, &job("profiles.save", json!({ "name": "Night" })));
+
+        let reply = dispatch(&context, &job("profiles.delete", json!({ "id": "night" })));
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload["deleted"], json!("night"));
+        assert_eq!(reply.payload["profiles"], json!([]));
+        assert!(!context.profiles_dir.join("night.json").exists());
+
+        let again = dispatch(&context, &job("profiles.delete", json!({ "id": "night" })));
+        assert!(!again.ok);
+        assert!(
+            again.error.unwrap_or_default().contains("not found"),
+            "a missing profile names the reason"
+        );
+    }
+
+    #[test]
+    fn profiles_apply_refuses_an_unknown_id() {
+        let (_dir, context) = context();
+
+        let reply = dispatch(&context, &job("profiles.apply", json!({ "id": "absent" })));
+
+        assert!(!reply.ok);
+        assert!(reply.error.unwrap_or_default().contains("not found"));
+    }
+
+    #[test]
+    fn profiles_save_refuses_a_blank_name() {
+        let (_dir, context) = context();
+
+        let reply = dispatch(&context, &job("profiles.save", json!({ "name": "   " })));
+
+        assert!(!reply.ok);
+        assert!(reply.error.unwrap_or_default().contains("name"));
+        assert_eq!(
+            dispatch(&context, &job("profiles.list", Value::Null)).payload["profiles"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn a_cyrillic_profile_name_gets_a_stable_ascii_id() {
+        let (_dir, context) = context();
+
+        let first = dispatch(&context, &job("profiles.save", json!({ "name": "Ночь" })));
+        assert!(first.ok, "{first:?}");
+        let id = first.payload["profile"]["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+        assert!(id.starts_with("profile-"), "{id}");
+        assert!(id.is_ascii(), "{id}");
+
+        let second = dispatch(&context, &job("profiles.save", json!({ "name": "Ночь" })));
+        assert!(second.ok, "{second:?}");
+        assert_eq!(second.payload["profile"]["id"], json!(id));
+        assert_eq!(second.payload["profiles"].as_array().map(Vec::len), Some(1));
     }
 
     #[test]

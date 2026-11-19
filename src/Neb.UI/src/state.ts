@@ -10,6 +10,7 @@
 export type ScreenId =
   | "overview"
   | "appearance"
+  | "profiles"
   | "zapret"
   | "discord"
   | "winmode"
@@ -31,6 +32,7 @@ export type ScreenId =
 export const screenOrder: readonly ScreenId[] = [
   "overview",
   "appearance",
+  "profiles",
   "zapret",
   "discord",
   "winmode",
@@ -45,7 +47,7 @@ export const screenOrder: readonly ScreenId[] = [
 
 /**
  * The digit a screen answers to: `Ctrl+1`..`Ctrl+9` for the first nine, `Ctrl+0` for the last one.
- * With twelve sections the two screens at positions ten and eleven have no free digit, so they
+ * With thirteen sections the three screens at positions ten to twelve have no free digit, so they
  * report `null` and the sidebar simply omits their badges.
  */
 export function screenShortcut(index: number, total: number): string | null {

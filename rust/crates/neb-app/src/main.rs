@@ -14,6 +14,7 @@
 
 mod bridge;
 mod instance;
+mod show_animation;
 mod themes;
 mod ui;
 mod webview;
@@ -36,7 +37,7 @@ fn main() -> ExitCode {
 
     // One window per session. The second process never reaches WebView2: it finds the first
     // window, brings it forward and leaves.
-    let (_instance, first) = match instance::Instance::acquire(instance::INSTANCE_MUTEX) {
+    let (_instance, first) = match instance::Instance::acquire(&instance::mutex_name()) {
         Ok(instance) => instance,
         Err(error) => {
             window::report_failure(
@@ -108,7 +109,12 @@ fn run(root: &std::path::Path, log: Option<&LogHandle>) -> ExitCode {
         }
     };
 
-    let window = match window::create(&config.window, store.clone()) {
+    let window = match window::create(
+        &config.window,
+        config.animations,
+        store.clone(),
+        log.cloned(),
+    ) {
         Ok(window) => window,
         Err(error) => {
             log_message(log, Level::Error, &format!("window: {error}"));
@@ -118,9 +124,20 @@ fn run(root: &std::path::Path, log: Option<&LogHandle>) -> ExitCode {
     };
 
     let source = ui::resolve(&exe_dir());
-    let context = bridge::Context::new(store, themes::dir(root), Some(window.raw()), log.cloned());
+    let context = bridge::Context::new(
+        store,
+        themes::dir(root),
+        root.join("profiles"),
+        Some(window.raw()),
+        log.cloned(),
+    );
 
-    let webview = match webview::WebView::start(window.hwnd(), &root.join("webview2"), context) {
+    let webview = match webview::WebView::start(
+        window.hwnd(),
+        &root.join("webview2"),
+        context,
+        zoom_factor(log),
+    ) {
         Ok(webview) => webview,
         Err(error) => {
             log_message(log, Level::Error, &format!("webview: {error}"));
@@ -168,13 +185,16 @@ fn run(root: &std::path::Path, log: Option<&LogHandle>) -> ExitCode {
     if let Err(error) = loaded {
         log_message(log, Level::Error, &format!("navigation: {error}"));
 
-        // The window is already on screen; the fallback page is still better than an empty frame.
+        // The window is about to be shown; the fallback page is still better than an empty frame.
         if let Err(fallback) = webview.navigate_html(&ui::fallback_html(bridge::VERSION)) {
             log_message(log, Level::Error, &format!("fallback: {fallback}"));
         }
     }
 
     window.attach(webview);
+
+    // The window was created hidden so the slide never uncovers a blank WebView2 surface.
+    window.reveal();
     log_message(log, Level::Info, "window shown");
 
     let code = window::Window::wait();
@@ -198,6 +218,36 @@ fn exe_dir() -> PathBuf {
         .ok()
         .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The layout-proxy zoom requested by `NEB_APP_ZOOM`, or `None`.
+///
+/// This is a QA hook, not a user preference: it lets a 100 % desktop exercise the CSS layout of a
+/// 125 % or 150 % display through WebView2's `SetZoomFactor`. A real monitor scales the pixels
+/// around the page; the zoom shrinks the CSS viewport instead, so it proves layout reflow and not
+/// font rasterisation or per-monitor window transitions.
+fn zoom_factor(log: Option<&LogHandle>) -> Option<f64> {
+    let raw = std::env::var("NEB_APP_ZOOM").ok()?;
+    let zoom = raw.trim().parse::<f64>().ok();
+
+    match zoom {
+        Some(zoom) if zoom.is_finite() && (0.25..=5.0).contains(&zoom) => {
+            log_message(
+                log,
+                Level::Info,
+                &format!("dpi: layout proxy zoom {zoom} requested by NEB_APP_ZOOM"),
+            );
+            Some(zoom)
+        }
+        _ => {
+            log_message(
+                log,
+                Level::Warn,
+                &format!("dpi: ignoring NEB_APP_ZOOM='{raw}' (expected 0.25..=5.0)"),
+            );
+            None
+        }
+    }
 }
 
 /// Writes one log line when logging came up; a missing log file must never stop the window.

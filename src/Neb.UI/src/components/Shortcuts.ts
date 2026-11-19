@@ -33,6 +33,10 @@ const groups: readonly ShortcutGroup[] = [
       { keys: ["Ctrl", "K"], label: "shortcuts.palette" },
       { keys: ["Alt", "Space"], label: "shortcuts.launcher" },
       { keys: ["F1", "?"], label: "shortcuts.help" },
+      { keys: ["Ctrl", "M"], label: "shortcuts.minimize" },
+      { keys: ["F11"], label: "shortcuts.maximize" },
+      { keys: ["Ctrl", "W"], label: "shortcuts.closeWindow" },
+      { keys: ["Esc"], label: "shortcuts.closeOverlay" },
     ],
   },
   {

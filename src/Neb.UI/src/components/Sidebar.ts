@@ -1,7 +1,23 @@
 import type { I18n, Language, MessageKey } from "../i18n";
 import { Languages } from "../i18n";
+import { en } from "../i18n/en";
+import { ru } from "../i18n/ru";
 import { screenOrder, screenShortcut, type ScreenId } from "../state";
 import { icon, type IconName } from "./icons";
+
+/**
+ * Nav labels for screens added after the i18n slice froze its tables. `ru`/`en` are the live table
+ * objects `createI18n` reads, so adding the two keys here makes the sidebar, the window title and
+ * the shortcut sheet agree without editing `i18n/*` (owned by another slice).
+ */
+const extraNav: Record<string, { ru: string; en: string }> = {
+  "nav.profiles": { ru: "Профили", en: "Profiles" },
+};
+
+for (const [key, labels] of Object.entries(extraNav)) {
+  (ru as unknown as Record<string, string>)[key] = labels.ru;
+  (en as unknown as Record<string, string>)[key] = labels.en;
+}
 
 export interface SidebarOptions {
   active: ScreenId;
@@ -28,6 +44,12 @@ type Section = {
 export const screenMeta: Record<ScreenId, Section> = {
   overview: { id: "overview", label: "nav.overview", icon: "home", group: "product" },
   appearance: { id: "appearance", label: "nav.appearance", icon: "palette", group: "product" },
+  profiles: {
+    id: "profiles",
+    label: "nav.profiles" as MessageKey,
+    icon: "profiles",
+    group: "product",
+  },
   zapret: { id: "zapret", label: "nav.zapret", icon: "network", group: "product" },
   discord: { id: "discord", label: "nav.discord", icon: "discord", group: "product" },
   winmode: { id: "winmode", label: "nav.winmode", icon: "taskbar", group: "product" },

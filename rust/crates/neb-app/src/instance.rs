@@ -18,6 +18,21 @@ use crate::window::CLASS_NAME;
 /// Mutex that makes sure a session has exactly one settings window.
 pub const INSTANCE_MUTEX: &str = r"Local\ProjectNeb.App";
 
+/// Environment variable that renames the single-instance mutex.
+///
+/// It exists so a QA run of a development build can open next to the installed one instead of
+/// merely focusing it; an unset or blank value keeps [`INSTANCE_MUTEX`].
+pub const INSTANCE_VARIABLE: &str = "NEB_APP_INSTANCE";
+
+/// The mutex name for this process: [`INSTANCE_MUTEX`], or the [`INSTANCE_VARIABLE`] override.
+pub fn mutex_name() -> String {
+    std::env::var(INSTANCE_VARIABLE)
+        .ok()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| INSTANCE_MUTEX.to_owned())
+}
+
 /// How long a second process waits for the first window to appear.
 ///
 /// The window is created after the data root, logging and COM are ready, so a launch that races the

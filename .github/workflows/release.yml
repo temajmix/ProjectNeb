@@ -1,0 +1,541 @@
+name: Release
+
+# Two entry points:
+#   * push a v* tag  -> build, sign (when enabled) and publish the GitHub release
+#   * workflow_dispatch -> build and upload artifacts only, no release
+#
+# The build reproduces `neb-cli release`: ProjectNeb-<version>-<channel>-setup.exe
+# and ProjectNeb-<version>-<channel>-portable.zip, with the dashboard under ui/.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without the v prefix (MAJOR.MINOR.PATCH)'
+        required: true
+        type: string
+      notes:
+        description: 'Release notes (Markdown). Empty uses dist/release-notes-<version>.md'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Desktop tests need an interactive session; the runner has none.
+  NEB_SKIP_DESKTOP_TESTS: '1'
+  CHANNEL: beta
+
+jobs:
+  build:
+    name: Build Windows release
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      channel: ${{ steps.meta.outputs.channel }}
+      tag: ${{ steps.meta.outputs.tag }}
+      setup: ${{ steps.meta.outputs.setup }}
+      portable: ${{ steps.meta.outputs.portable }}
+      setup_sha: ${{ steps.hashes.outputs.setup_sha }}
+      portable_sha: ${{ steps.hashes.outputs.portable_sha }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Resolve version and asset names
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Get-Location).Path
+
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            $raw = $env:INPUT_VERSION
+          }
+          else {
+            $raw = $env:REF_NAME
+          }
+
+          if ([string]::IsNullOrWhiteSpace($raw)) {
+            throw 'a version is required: pass workflow_dispatch input "version" or push a v* tag'
+          }
+
+          $version = $raw.Trim()
+          if ($version.StartsWith('v')) {
+            $version = $version.Substring(1)
+          }
+
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "version '$raw' is not MAJOR.MINOR.PATCH (for example 0.6.0)"
+          }
+
+          $channel = $env:CHANNEL
+          if ($channel -notmatch '^[A-Za-z0-9_-]+$') {
+            throw "channel '$channel' must be letters, digits, '-' or '_'"
+          }
+
+          # The tag names the release; the built binaries must already carry the
+          # same version. Bump rust/Cargo.toml and commit it before tagging.
+          $inSection = $false
+          $workspaceVersion = $null
+          foreach ($line in [IO.File]::ReadAllLines((Join-Path $root 'rust\Cargo.toml'))) {
+            $trimmed = $line.Trim()
+            if ($trimmed.StartsWith('[')) {
+              $inSection = ($trimmed -eq '[workspace.package]')
+              continue
+            }
+            if ($inSection -and $trimmed -match '^version\s*=\s*"([^"]+)"') {
+              $workspaceVersion = $Matches[1]
+              break
+            }
+          }
+
+          if (-not $workspaceVersion) {
+            throw 'rust/Cargo.toml has no [workspace.package] version'
+          }
+
+          if ($workspaceVersion -ne $version) {
+            throw "requested version $version does not match rust/Cargo.toml ($workspaceVersion); bump the workspace version and commit it before releasing"
+          }
+
+          $setup = "ProjectNeb-$version-$channel-setup.exe"
+          $portable = "ProjectNeb-$version-$channel-portable.zip"
+          $tag = "v$version"
+
+          $output = "version=$version`nchannel=$channel`ntag=$tag`nsetup=$setup`nportable=$portable`n"
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, $output)
+
+          Write-Host "version=$version channel=$channel tag=$tag"
+          Write-Host "setup=$setup"
+          Write-Host "portable=$portable"
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/Neb.UI/package-lock.json
+
+      - name: Install the Rust GNU toolchain
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal --component rustfmt --component clippy
+          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install failed with exit code $LASTEXITCODE" }
+
+          rustup default stable-x86_64-pc-windows-gnu
+          if ($LASTEXITCODE -ne 0) { throw "rustup default failed with exit code $LASTEXITCODE" }
+
+          rustc --version
+          cargo --version
+
+      - name: Install WinLibs (MinGW-w64)
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          choco install mingw --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw "choco install mingw failed with exit code $LASTEXITCODE" }
+
+          # The chocolatey package layout differs between releases, so locate gcc
+          # instead of hardcoding one directory.
+          $gccPath = $null
+          $searchRoots = @(
+            'C:\ProgramData\chocolatey\lib\mingw',
+            'C:\ProgramData\mingw64',
+            'C:\mingw64'
+          )
+
+          foreach ($searchRoot in $searchRoots) {
+            if (-not (Test-Path -LiteralPath $searchRoot)) { continue }
+            $gcc = Get-ChildItem -LiteralPath $searchRoot -Filter 'gcc.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($gcc) {
+              $gccPath = $gcc.FullName
+              break
+            }
+          }
+
+          if (-not $gccPath) {
+            $command = Get-Command gcc -ErrorAction SilentlyContinue
+            if ($command) { $gccPath = $command.Source }
+          }
+
+          if (-not $gccPath) {
+            throw 'gcc.exe was not found after installing WinLibs; the GNU target cannot link'
+          }
+
+          $mingwBin = Split-Path -Parent $gccPath
+          [IO.File]::AppendAllText($env:GITHUB_PATH, "$mingwBin`n")
+
+          & $gccPath --version | Select-Object -First 1
+
+      - name: Install Inno Setup
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          choco install innosetup --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed with exit code $LASTEXITCODE" }
+
+          $candidates = @()
+          if (${env:ProgramFiles(x86)}) {
+            $candidates += Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          }
+          if ($env:ProgramFiles) {
+            $candidates += Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe'
+          }
+
+          $iscc = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+
+          if (-not $iscc) {
+            $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($command) { $iscc = $command.Source }
+          }
+
+          if (-not $iscc) {
+            throw 'ISCC.exe was not found after installing Inno Setup'
+          }
+
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "ISCC=$iscc`n")
+          Write-Host "ISCC=$iscc"
+
+      - name: Show tool versions
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          rustc --version
+          cargo --version
+          gcc --version | Select-Object -First 1
+          node --version
+          npm --version
+          if (-not (Test-Path -LiteralPath $env:ISCC)) { throw "ISCC is missing at '$env:ISCC'" }
+
+      - name: Check formatting
+        working-directory: rust
+        run: cargo fmt --all --check
+
+      - name: Run clippy with warnings denied
+        working-directory: rust
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run the test suite
+        working-directory: rust
+        env:
+          NEB_SKIP_DESKTOP_TESTS: '1'
+        run: cargo test --workspace
+
+      - name: Build the dashboard
+        working-directory: src/Neb.UI
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE" }
+
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw "npm run build failed with exit code $LASTEXITCODE" }
+
+      - name: Build release binaries
+        working-directory: rust
+        run: cargo build --workspace --release
+
+      - name: Verify release inputs
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Get-Location).Path
+
+          $required = @(
+            'ProjectNeb.exe',
+            'neb-shell.exe',
+            'neb-wallpaper.exe',
+            'neb-updater.exe',
+            'neb-app.exe',
+            'WebView2Loader.dll',
+            'neb-zapret.exe',
+            'neb-windhawk.exe',
+            'neb-discord.exe',
+            'neb-wm.exe',
+            'neb-cli.exe'
+          )
+
+          foreach ($name in $required) {
+            $path = Join-Path $root "rust\target\release\$name"
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "release binary is missing: '$path'"
+            }
+          }
+
+          if (-not (Test-Path -LiteralPath (Join-Path $root 'src\Neb.UI\dist\index.html') -PathType Leaf)) {
+            throw 'the dashboard build is missing: src\Neb.UI\dist\index.html'
+          }
+
+      - name: Stage the portable archive
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Get-Location).Path
+
+          ./packaging/ci/stage-portable.ps1 `
+            -RepoRoot $root `
+            -Version '${{ steps.meta.outputs.version }}' `
+            -Channel '${{ steps.meta.outputs.channel }}' `
+            -Output (Join-Path $root 'dist\${{ steps.meta.outputs.portable }}')
+
+      - name: Render the installer script
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Get-Location).Path
+
+          ./packaging/ci/render-installer.ps1 `
+            -RepoRoot $root `
+            -Version '${{ steps.meta.outputs.version }}' `
+            -Channel '${{ steps.meta.outputs.channel }}' `
+            -Output (Join-Path $env:RUNNER_TEMP 'ProjectNeb.iss')
+
+      - name: Build the installer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Get-Location).Path
+
+          $script = Join-Path $env:RUNNER_TEMP 'ProjectNeb.iss'
+          & $env:ISCC $script
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+
+          $setup = Join-Path $root 'dist\${{ steps.meta.outputs.setup }}'
+          if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
+            throw "Inno Setup finished but '$setup' is missing"
+          }
+
+          Get-Item -LiteralPath $setup | Select-Object Name, Length
+
+      - name: Upload the unsigned installer for signing
+        id: upload-unsigned
+        if: vars.SIGNPATH_ENABLED == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-installer
+          path: dist/${{ steps.meta.outputs.setup }}
+          if-no-files-found: error
+          retention-days: 7
+
+      # Signing is off unless the repository variable SIGNPATH_ENABLED is the
+      # string "true". A missing variable leaves the unsigned installer intact
+      # and never fails the build.
+      - name: Sign the installer with SignPath
+        if: vars.SIGNPATH_ENABLED == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          parameters: |
+            version: "${{ steps.meta.outputs.version }}"
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Use the signed installer
+        if: vars.SIGNPATH_ENABLED == 'true'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Get-Location).Path
+
+          $signed = @(Get-ChildItem -LiteralPath (Join-Path $root 'signed') -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue)
+          if ($signed.Count -eq 0) {
+            throw 'SignPath returned no .exe'
+          }
+
+          $target = Join-Path $root 'dist\${{ steps.meta.outputs.setup }}'
+          Copy-Item -LiteralPath $signed[0].FullName -Destination $target -Force
+
+          $signature = Get-AuthenticodeSignature -FilePath $target
+          if ($signature.Status -ne 'Valid') {
+            throw "the signed installer is not valid: $($signature.Status) $($signature.StatusMessage)"
+          }
+
+          Write-Host "signed by: $($signature.SignerCertificate.Subject)"
+
+      - name: Write the release notes
+        env:
+          INPUT_NOTES: ${{ inputs.notes }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Get-Location).Path
+
+          $notes = $env:INPUT_NOTES
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            $candidates = @(
+              (Join-Path $root "dist\release-notes-$($env:VERSION).md"),
+              (Join-Path $root 'RELEASE-NOTES.md'),
+              (Join-Path $root 'docs\beta\RELEASE-NOTES.md')
+            )
+
+            $notesFile = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+            if ($notesFile) {
+              $notes = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $notesFile).Path, [Text.Encoding]::UTF8)
+            }
+            else {
+              $notes = "ProjectNeb $($env:VERSION) Beta."
+            }
+          }
+
+          $notes = $notes.Trim()
+          $changelog = 'https://github.com/temajmix/ProjectNeb/blob/main/CHANGELOG.md'
+          if ($notes -notmatch [regex]::Escape($changelog)) {
+            $notes = $notes + "`n`nChangelog: $changelog"
+          }
+
+          [IO.File]::WriteAllText(
+            (Join-Path $root 'dist\release-notes.md'),
+            $notes + "`n",
+            (New-Object System.Text.UTF8Encoding($false))
+          )
+
+      - name: Compute SHA-256 checksums
+        id: hashes
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          CHANNEL: ${{ steps.meta.outputs.channel }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Get-Location).Path
+
+          $setup = Join-Path $root "dist\ProjectNeb-$($env:VERSION)-$($env:CHANNEL)-setup.exe"
+          $portable = Join-Path $root "dist\ProjectNeb-$($env:VERSION)-$($env:CHANNEL)-portable.zip"
+          $lines = @()
+
+          foreach ($file in @($setup, $portable)) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "release asset is missing: '$file'"
+            }
+
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+            $lines += "$hash  $(Split-Path -Leaf $file)"
+          }
+
+          [IO.File]::WriteAllText(
+            (Join-Path $root 'dist\SHA256SUMS.txt'),
+            (($lines -join "`n") + "`n"),
+            (New-Object System.Text.UTF8Encoding($false))
+          )
+
+          $setupSha = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash
+          $portableSha = (Get-FileHash -LiteralPath $portable -Algorithm SHA256).Hash
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "setup_sha=$setupSha`nportable_sha=$portableSha`n")
+
+          $lines | ForEach-Object { Write-Host $_ }
+
+      - name: Summarise the build
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          CHANNEL: ${{ steps.meta.outputs.channel }}
+          SETUP_SHA: ${{ steps.hashes.outputs.setup_sha }}
+          PORTABLE_SHA: ${{ steps.hashes.outputs.portable_sha }}
+          SIGNING: ${{ vars.SIGNPATH_ENABLED == 'true' && 'enabled' || 'disabled' }}
+        run: |
+          $root = (Get-Location).Path
+          $setup = Get-Item -LiteralPath (Join-Path $root "dist\ProjectNeb-$($env:VERSION)-$($env:CHANNEL)-setup.exe")
+          $portable = Get-Item -LiteralPath (Join-Path $root "dist\ProjectNeb-$($env:VERSION)-$($env:CHANNEL)-portable.zip")
+
+          $summary = @(
+            "## ProjectNeb $($env:VERSION) ($($env:CHANNEL))",
+            "",
+            "| Asset | Size | SHA-256 |",
+            "| --- | ---: | --- |",
+            "| $($setup.Name) | $($setup.Length) | $($env:SETUP_SHA) |",
+            "| $($portable.Name) | $($portable.Length) | $($env:PORTABLE_SHA) |",
+            "",
+            "Signing: $($env:SIGNING)"
+          )
+
+          [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, (($summary -join "`n") + "`n"))
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: |
+            dist/${{ steps.meta.outputs.setup }}
+            dist/${{ steps.meta.outputs.portable }}
+            dist/release-notes.md
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish the GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download the release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: release
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+          CHANNEL: ${{ needs.build.outputs.channel }}
+          SETUP: ${{ needs.build.outputs.setup }}
+          PORTABLE: ${{ needs.build.outputs.portable }}
+        run: |
+          set -euo pipefail
+
+          title="ProjectNeb ${VERSION} Beta"
+          files=(
+            "release/${SETUP}"
+            "release/${PORTABLE}"
+            "release/release-notes.md"
+            "release/SHA256SUMS.txt"
+          )
+
+          for file in "${files[@]}"; do
+            test -f "$file" || { echo "missing release asset: $file" >&2; exit 1; }
+          done
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$title" --notes-file release/release-notes.md
+          else
+            gh release create "$TAG" "${files[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --notes-file release/release-notes.md \
+              --verify-tag
+          fi

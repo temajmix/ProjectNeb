@@ -22,32 +22,143 @@ const fontOptions: ReadonlyArray<{ value: string; label: MessageKey }> = [
   { value: "system", label: "appearance.font.system" },
 ];
 
+/**
+ * The gallery's own copy. `i18n/*` belongs to another slice, so the two new sentences live here
+ * and follow `ctx.i18n.language`; everything that already has a key reuses it.
+ */
+const copy = {
+  ru: {
+    galleryHint: "Шесть готовых образов. Применение перекрашивает бар и док сразу.",
+    apply: "Применить",
+    applied: "Применена",
+    appliedToast: "Тема «{name}» применена",
+    applyFailed: "Не удалось применить тему",
+    customTitle: "Свои темы",
+    customHint: "Сохранённые из редактора ниже.",
+    customDescription: "Своя палитра без описания.",
+    presetDescription: "Готовая палитра ProjectNeb.",
+  },
+  en: {
+    galleryHint: "Six ready-made looks. Applying one repaints the bar and the dock immediately.",
+    apply: "Apply",
+    applied: "Applied",
+    appliedToast: "Theme “{name}” applied",
+    applyFailed: "The theme could not be applied",
+    customTitle: "My themes",
+    customHint: "Saved from the editor below.",
+    customDescription: "A custom palette without a description.",
+    presetDescription: "A ready-made ProjectNeb palette.",
+  },
+} as const;
+
+type CopyKey = keyof (typeof copy)["ru"];
+
+/**
+ * Russian descriptions for the six compiled-in presets. The package keeps English, which is the
+ * right default for an exported theme; the gallery reads the active language here.
+ */
+const presetText: Record<string, { ru: string; en: string }> = {
+  "nebula-glass": {
+    ru: "Фирменный вид ProjectNeb: глубокое фиолетовое стекло и мягкий лавандовый акцент.",
+    en: "The shipped ProjectNeb look: deep violet glass with a soft lavender accent.",
+  },
+  hyprland: {
+    ru: "Плоский и тонкий, почти без скруглений, с контрастным бирюзовым акцентом.",
+    en: "Flat, thin and nearly square, with one high-contrast teal accent.",
+  },
+  macos: {
+    ru: "Компактная матовая панель с ярким системно-синим акцентом.",
+    en: "A compact frosted bar with a bright system-blue accent.",
+  },
+  "minimal-dark": {
+    ru: "Почти чёрный, квадратный и тихий: без градиентов и лишнего.",
+    en: "Near-black, square and quiet: no gradients, no fuss.",
+  },
+  cyberpunk: {
+    ru: "Маджента и циан на чистом чёрном — для неоновых вечеров.",
+    en: "Magenta and cyan on pure black, built for neon nights.",
+  },
+  "windows-clean": {
+    ru: "Нейтральный серый и синий Windows 11, близко к системному оформлению.",
+    en: "Neutral grey and Windows blue, close to the stock Windows 11 chrome.",
+  },
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A listed theme: what the editor edits plus the gallery's description and origin. */
+interface ThemeEntry extends ThemeSettings {
+  description: string;
+  builtin: boolean;
+}
+
+/** The package stores opacity as `0.4..=1`, the editor speaks percent. */
+function opacityPercent(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  return value <= 1 ? Math.round(value * 100) : value;
+}
+
+function readThemeEntry(raw: unknown, fallback: ThemeSettings): ThemeEntry | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+
+  const tokens = isRecord(raw.tokens) ? raw.tokens : raw;
+  const theme = normalizeTheme(
+    {
+      ...tokens,
+      id: typeof raw.id === "string" ? raw.id : tokens.id,
+      name: typeof raw.name === "string" ? raw.name : tokens.name,
+      opacity: opacityPercent(tokens.opacity) ?? fallback.opacity,
+      dockTileSize:
+        typeof tokens.dockTile === "number" ? tokens.dockTile : tokens.dockTileSize,
+    },
+    fallback,
+  );
+
+  if (theme.id.length === 0) {
+    return null;
+  }
+
+  return {
+    ...theme,
+    description: typeof raw.description === "string" ? raw.description.trim() : "",
+    builtin: raw.builtin === true || raw.builtIn === true,
+  };
+}
+
+function readThemes(raw: unknown): ThemeEntry[] {
+  const list = Array.isArray(raw)
+    ? raw
+    : isRecord(raw) && Array.isArray(raw.themes)
+      ? raw.themes
+      : [];
+
+  return list
+    .map((entry) => readThemeEntry(entry, defaultTheme))
+    .filter((theme): theme is ThemeEntry => theme !== null);
+}
+
 function fontStack(font: string): string {
-  if (font === "JetBrains Mono") {
-    return '"JetBrains Mono", monospace';
+  const mono = /mono|cascadia|consolas/i.test(font);
+  if (mono) {
+    return `"${font}", "JetBrains Mono", monospace`;
   }
 
   if (font === "system") {
     return "system-ui, sans-serif";
   }
 
+  if (font.length > 0 && font !== "Onest") {
+    return `"${font}", Onest, system-ui, sans-serif`;
+  }
+
   return "Onest, system-ui, sans-serif";
-}
-
-function readThemes(raw: unknown): ThemeSettings[] {
-  const list = Array.isArray(raw)
-    ? raw
-    : typeof raw === "object" && raw !== null && Array.isArray((raw as { themes?: unknown }).themes)
-      ? (raw as { themes: unknown[] }).themes
-      : [];
-
-  return list
-    .map((entry) => normalizeTheme(entry, defaultTheme))
-    .filter((theme) => theme.id.length > 0);
-}
-
-function swatch(theme: ThemeSettings): string {
-  return `radial-gradient(circle at 32% 26%, ${theme.colors.accent} 0 34%, ${theme.colors.background} 100%)`;
 }
 
 export function createAppearanceScreen(ctx: AppContext): Screen {
@@ -55,9 +166,23 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
   root.className = "screen appearance";
   root.dataset.screen = "appearance";
 
+  const t = (key: CopyKey, params?: Record<string, string | number>): string => {
+    const template = copy[ctx.i18n.language][key];
+    if (!params) {
+      return template;
+    }
+
+    return template.replace(/\{(\w+)\}/g, (match, name: string) =>
+      params[name] === undefined ? match : String(params[name]),
+    );
+  };
+
   let draft: ThemeSettings = cloneTheme(ctx.config().theme);
   let baseline: ThemeSettings = cloneTheme(draft);
-  let themes: ThemeSettings[] = [];
+  let draftDescription = "";
+  let themes: ThemeEntry[] = [];
+  let activeId = ctx.config().theme.id;
+  let applyingId: string | null = null;
   let loading = false;
   let saving = false;
   let invalid = new Set<keyof ThemeColors>();
@@ -153,9 +278,51 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     setDirtyChrome();
   };
 
-  const setTheme = (theme: ThemeSettings): void => {
+  const mergeTheme = (theme: ThemeEntry): void => {
+    const index = themes.findIndex((known) => known.id === theme.id);
+    if (index >= 0) {
+      themes = themes.map((known) => (known.id === theme.id ? theme : known));
+    } else {
+      themes = [...themes, theme];
+    }
+  };
+
+  const adoptTheme = (theme: ThemeEntry): void => {
     draft = cloneTheme(theme);
+    baseline = cloneTheme(draft);
+    draftDescription = theme.description;
     invalid = new Set();
+    applyPreview();
+    setDirtyChrome();
+  };
+
+  const applyTheme = async (theme: ThemeEntry): Promise<void> => {
+    if (applyingId !== null || saving) {
+      return;
+    }
+
+    applyingId = theme.id;
+    render();
+
+    const result = await ctx.host.call<unknown>("themes.apply", {
+      id: theme.id,
+      themeId: theme.id,
+    });
+    applyingId = null;
+
+    if (!result.ok) {
+      ctx.notifyFailure(result);
+      render();
+      return;
+    }
+
+    const payload = isRecord(result.data) ? result.data : {};
+    activeId = typeof payload.id === "string" ? payload.id : theme.id;
+    mergeTheme(theme);
+    adoptTheme(theme);
+    ctx.setLocalConfig("theme", cloneTheme(theme));
+    ctx.setThemeName(theme.name);
+    showToast(t("appliedToast", { name: theme.name }), "success");
     render();
   };
 
@@ -175,10 +342,16 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     saving = true;
     setDirtyChrome();
 
-    const result = await ctx.host.call<unknown>("themes.save", {
+    const document = {
       ...draft,
-      theme: { ...draft, colors: { ...draft.colors } },
-    });
+      description: draftDescription,
+      theme: {
+        ...draft,
+        description: draftDescription,
+        colors: { ...draft.colors },
+      },
+    };
+    const result = await ctx.host.call<unknown>("themes.save", document);
 
     saving = false;
     if (!result.ok) {
@@ -187,9 +360,17 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
       return;
     }
 
-    baseline = cloneTheme(draft);
-    ctx.setLocalConfig("theme", cloneTheme(draft));
-    ctx.setThemeName(draft.name);
+    const payload = isRecord(result.data) ? result.data : {};
+    const saved = readThemeEntry(payload.theme, draft) ?? {
+      ...cloneTheme(draft),
+      description: draftDescription,
+      builtin: false,
+    };
+    activeId = typeof payload.active === "string" ? payload.active : saved.id;
+    mergeTheme(saved);
+    adoptTheme(saved);
+    ctx.setLocalConfig("theme", cloneTheme(saved));
+    ctx.setThemeName(saved.name);
     setDirtyChrome();
     showToast(ctx.i18n.t("appearance.saved"), "success");
     render();
@@ -240,28 +421,104 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     return head;
   };
 
-  const renderPresets = (): HTMLElement => {
+  const themeCard = (theme: ThemeEntry): HTMLElement => {
+    const active = theme.id === activeId;
+    const busy = applyingId === theme.id;
+    const card = el("article", `preset-card${active ? " preset-card--active" : ""}`);
+    card.dataset.theme = theme.id;
+
+    const preview = el("div", "preset-card__preview");
+    preview.setAttribute("aria-hidden", "true");
+    preview.style.setProperty("--pc-bg", theme.colors.background);
+    preview.style.setProperty("--pc-surface", theme.colors.surface);
+    preview.style.setProperty("--pc-stroke", theme.colors.stroke);
+    preview.style.setProperty("--pc-text", theme.colors.text);
+    preview.style.setProperty("--pc-accent", theme.colors.accent);
+    preview.style.setProperty("--pc-accent2", theme.colors.accent2);
+    preview.style.setProperty("--pc-opacity", `${theme.opacity}%`);
+
+    const chrome = el("div", "preset-card__chrome");
+    const mark = el("span", "preset-card__mark");
+    const line = el("span", "preset-card__line");
+    const clock = el("span", "preset-card__clock");
+    chrome.append(mark, line, clock);
+
+    const dots = el("div", "preset-card__dots");
+    for (const colour of [
+      theme.colors.background,
+      theme.colors.surface,
+      theme.colors.accent,
+      theme.colors.accent2,
+    ]) {
+      const dot = el("span", "preset-card__dot");
+      dot.style.background = colour;
+      dots.append(dot);
+    }
+
+    preview.append(chrome, dots);
+
+    const body = el("div", "preset-card__copy");
+    const head = el("div", "preset-card__head");
+    head.append(el("h3", "preset-card__name", theme.name));
+    if (active) {
+      head.append(el("span", "pill pill--on", t("applied")));
+    }
+
+    const description =
+      (theme.builtin ? presetText[theme.id]?.[ctx.i18n.language] : undefined) ||
+      theme.description ||
+      (theme.builtin ? t("presetDescription") : t("customDescription"));
+    body.append(head, el("p", "preset-card__desc", description));
+
+    const foot = el("div", "preset-card__foot");
+    const apply = button({
+      label: busy ? "…" : active ? t("applied") : t("apply"),
+      variant: active ? "ghost" : "secondary",
+      size: "sm",
+      icon: active ? "check" : undefined,
+      title: theme.name,
+      onClick: () => void applyTheme(theme),
+    });
+    apply.disabled = active || busy || applyingId !== null;
+    apply.dataset.action = "apply-theme";
+    if (busy) {
+      apply.classList.add("is-busy");
+    }
+
+    foot.append(apply);
+    card.append(preview, body, foot);
+    return card;
+  };
+
+  const renderGallery = (): HTMLElement => {
     const card = panel({
       title: ctx.i18n.t("appearance.presets"),
-      hint: ctx.i18n.t("appearance.presetsHint"),
+      hint: t("galleryHint"),
       icon: "palette",
       className: "appearance__presets",
     });
 
-    const list = el("div", "presets");
-    for (const theme of themes) {
-      const active = theme.id === draft.id;
-      const choice = el("button", `preset${active ? " preset--active" : ""}`);
-      choice.type = "button";
-      choice.dataset.theme = theme.id;
-      choice.setAttribute("aria-pressed", String(active));
+    const builtins = themes.filter((theme) => theme.builtin);
+    const custom = themes.filter((theme) => !theme.builtin);
+    const gallery = el("div", "preset-gallery");
+    for (const theme of builtins.length > 0 ? builtins : custom) {
+      gallery.append(themeCard(theme));
+    }
 
-      const dot = el("span", "preset__swatch");
-      dot.style.background = swatch(theme);
-      const name = el("span", "preset__name", theme.name);
-      choice.append(dot, name);
-      choice.addEventListener("click", () => setTheme(theme));
-      list.append(choice);
+    card.body.append(gallery);
+
+    const customThemes = builtins.length > 0 ? custom : [];
+    if (customThemes.length > 0) {
+      const more = el("div", "preset-gallery preset-gallery--custom");
+      for (const theme of customThemes) {
+        more.append(themeCard(theme));
+      }
+
+      card.body.append(
+        el("div", "panel__subhead", t("customTitle")),
+        el("p", "preset-card__sectionHint", t("customHint")),
+        more,
+      );
     }
 
     const nameField = el("label", "name-field");
@@ -283,7 +540,7 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     });
     nameField.append(nameInput);
 
-    card.body.append(list, nameField);
+    card.body.append(nameField);
     return card.el;
   };
 
@@ -441,6 +698,15 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     const select = document.createElement("select");
     select.className = "select";
     select.id = "theme-font";
+    const presetFont = fontOptions.some((font) => font.value === draft.font);
+    if (!presetFont && draft.font.trim().length > 0) {
+      const option = document.createElement("option");
+      option.value = draft.font;
+      option.textContent = draft.font;
+      option.selected = true;
+      select.append(option);
+    }
+
     for (const font of fontOptions) {
       const option = document.createElement("option");
       option.value = font.value;
@@ -589,24 +855,34 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
         // uses; the motion switch is a plain config section and merges normally.
         const themeResult = await ctx.host.call<unknown>("themes.save", {
           ...cloneTheme(defaultTheme),
-          theme: cloneTheme(defaultTheme),
+          description: "",
+          theme: { ...cloneTheme(defaultTheme), description: "" },
         });
         if (!themeResult.ok) {
           ctx.notifyFailure(themeResult);
           return false;
         }
 
-        ctx.setLocalConfig("theme", cloneTheme(defaultTheme));
-        ctx.setThemeName(defaultTheme.name);
+        const payload = isRecord(themeResult.data) ? themeResult.data : {};
+        const saved = readThemeEntry(payload.theme, defaultTheme) ?? {
+          ...cloneTheme(defaultTheme),
+          description: "",
+          builtin: false,
+        };
+        activeId = typeof payload.active === "string" ? payload.active : saved.id;
+        mergeTheme(saved);
+        draftDescription = "";
+        ctx.setLocalConfig("theme", cloneTheme(saved));
+        ctx.setThemeName(saved.name);
 
-        const saved = await ctx.resetSections([
+        const savedSections = await ctx.resetSections([
           { section: "animations", values: { enabled: true, speed: 1 } },
         ]);
-        if (!saved) {
+        if (!savedSections) {
           return false;
         }
 
-        draft = cloneTheme(defaultTheme);
+        draft = cloneTheme(saved);
         baseline = cloneTheme(draft);
         invalid = new Set();
         render();
@@ -625,7 +901,7 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
 
     const grid = el("div", "appearance__grid");
     const left = el("div", "appearance__editor");
-    left.append(renderPresets(), renderPalette());
+    left.append(renderGallery(), renderPalette());
 
     const right = el("div", "appearance__side");
     right.append(renderPreview(), renderShape());
@@ -643,28 +919,34 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     loading = false;
 
     if (result.ok) {
-      const raw = result.data as { active?: unknown } | null;
+      const raw = isRecord(result.data) ? result.data : {};
       themes = readThemes(result.data);
 
-      const activeId =
-        typeof raw === "object" && raw !== null && typeof raw.active === "string"
+      activeId =
+        typeof raw.active === "string" && raw.active.length > 0
           ? raw.active
           : ctx.config().theme.id;
 
       const configTheme = ctx.config().theme;
-      const active = themes.find((theme) => theme.id === activeId) ?? configTheme;
-      if (!themes.some((theme) => theme.id === active.id)) {
-        themes = [active, ...themes];
-      }
+      const active =
+        themes.find((theme) => theme.id === activeId) ??
+        ({
+          ...normalizeTheme(configTheme, defaultTheme),
+          description: "",
+          builtin: false,
+        } satisfies ThemeEntry);
 
-      draft = cloneTheme(active);
-      baseline = cloneTheme(draft);
-      ctx.setThemeName(draft.name);
+      adoptTheme(active);
+      ctx.setThemeName(active.name);
     } else {
       // The editor still works with the config copy; only the preset list is missing.
-      themes = themes.length > 0 ? themes : [ctx.config().theme];
-      draft = cloneTheme(ctx.config().theme);
-      baseline = cloneTheme(draft);
+      const fallback: ThemeEntry = {
+        ...normalizeTheme(ctx.config().theme, defaultTheme),
+        description: "",
+        builtin: false,
+      };
+      themes = themes.length > 0 ? themes : [fallback];
+      adoptTheme(themes[0] ?? fallback);
     }
 
     invalid = new Set();

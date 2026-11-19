@@ -15,6 +15,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_COLOR, COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW,
     CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2_3,
     ICoreWebView2Controller, ICoreWebView2Controller2, ICoreWebView2Environment,
+    ICoreWebView2Settings3,
 };
 use webview2_com::{
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
@@ -95,7 +96,12 @@ impl WebView {
     /// # Errors
     ///
     /// [`WebViewError`] when the runtime is missing, COM refuses, or the bridge thread cannot start.
-    pub fn start(hwnd: HWND, user_data: &Path, context: Context) -> Result<Self, WebViewError> {
+    pub fn start(
+        hwnd: HWND,
+        user_data: &Path,
+        context: Context,
+        zoom: Option<f64>,
+    ) -> Result<Self, WebViewError> {
         if let Err(source) = std::fs::create_dir_all(user_data) {
             return Err(WebViewError::Profile(source));
         }
@@ -111,6 +117,12 @@ impl WebView {
             })?;
 
         configure(&controller, &core);
+
+        if let Some(zoom) = zoom {
+            // SAFETY: `controller` is the live controller created above; the value was clamped
+            // when it was read from the environment.
+            let _ = unsafe { controller.SetZoomFactor(zoom) };
+        }
 
         // Replies are posted from the bridge worker through the window's message queue: WebView2's
         // controller is apartment-threaded, so `PostWebMessageAsJson` off the UI thread fails with
@@ -455,6 +467,15 @@ fn configure(controller: &ICoreWebView2Controller, core: &ICoreWebView2) {
     let Ok(settings) = (unsafe { core.Settings() }) else {
         return;
     };
+
+    // The dashboard owns Ctrl+W, Ctrl+M, Ctrl+K and the rest of its chords. WebView2 would answer
+    // several of them itself (Ctrl+K focuses a non-existent address bar, Ctrl+W closes the tab
+    // behind the bridge's back), so its accelerator table is switched off. Editing chords such as
+    // Ctrl+C and Ctrl+V are not browser accelerators and keep working.
+    if let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() {
+        // SAFETY: `settings3` is the same live settings object, asked for a newer interface.
+        let _ = unsafe { settings3.SetAreBrowserAcceleratorKeysEnabled(false) };
+    }
 
     // SAFETY: every call writes a boolean setting on a live settings object.
     unsafe {

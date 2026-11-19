@@ -1,0 +1,17 @@
+{
+  "version": "0.1.0",
+  "channel": "beta",
+  "released": "2026-11-17",
+  "notes": "Первая публичная бета: панель, док, лаунчер и живые обои на Rust.",
+  "changelogUrl": "https://github.com/temajmix/ProjectNeb/blob/main/CHANGELOG.md",
+  "assets": {
+    "portable": {
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.1.0-beta/ProjectNeb-0.1.0-beta-portable.zip",
+      "sha256": "E89834E07CD17BA13FDF09B4B08890F0CEE2EB0F44FCA37FCB8C5F69FF39E48F"
+    },
+    "setup": {
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.1.0-beta/ProjectNeb-0.1.0-beta-setup.exe",
+      "sha256": "155649099E5D81F21FA50F67EFBDC1D41D430F29F2DA8356D49C8C66E1CB27DA"
+    }
+  }
+}

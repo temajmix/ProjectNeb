@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: ProjectNeb.ProjectNeb
+PackageVersion: 0.5.0
+PackageLocale: en-US
+Publisher: ProjectNeb
+PublisherUrl: https://github.com/temajmix/ProjectNeb
+PublisherSupportUrl: https://github.com/temajmix/ProjectNeb/issues
+Author: temajmix and ProjectNeb contributors
+PackageName: ProjectNeb
+PackageUrl: https://github.com/temajmix/ProjectNeb
+License: AGPL-3.0
+LicenseUrl: https://github.com/temajmix/ProjectNeb/blob/main/LICENSE
+Copyright: Copyright (c) ProjectNeb contributors
+ShortDescription: Windows 11 desktop dashboard with a panel, dock, launcher and live wallpapers.
+Description: |-
+  ProjectNeb is a Windows 11 desktop dashboard: a top panel, a dock, an
+  application launcher, a command palette and animated live wallpapers, built in
+  Rust with a WebView2 dashboard.
+
+  It is a local-first beta. Settings and logs live in %LocalAppData%\ProjectNeb;
+  the optional Discord Rich Presence, Windhawk and network-tuning modules are
+  off by default and only run when the user enables them. No telemetry is sent
+  by the client.
+Moniker: projectneb
+Tags:
+  - desktop
+  - dashboard
+  - dock
+  - launcher
+  - wallpaper
+  - customization
+  - windows-11
+ReleaseNotesUrl: https://github.com/temajmix/ProjectNeb/releases/tag/v0.5.0
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

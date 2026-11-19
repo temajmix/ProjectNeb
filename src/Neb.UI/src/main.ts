@@ -35,6 +35,7 @@ import { createShortcuts } from "./components/Shortcuts";
 import { CAPTION_BAND_HEIGHT, CAPTION_BAND_PROPERTY } from "./theme/contract";
 import { createOverview } from "./screens/Overview";
 import { createAppearanceScreen } from "./screens/Appearance";
+import { createProfilesScreen } from "./screens/Profiles";
 import { createBarScreen } from "./screens/BarWidgets";
 import { createZapretScreen } from "./screens/Zapret";
 import { createDiscordScreen } from "./screens/Discord";
@@ -182,8 +183,9 @@ function notifyFailure(result: Extract<CallResult<unknown>, { ok: false }>): voi
 
 // ---------- shell ----------
 
-// The desktop host (neb-app) keeps its native window frame, so the page must not draw a second
-// title bar; the browser preview keeps it.
+// The desktop host (neb-app) is a frameless window: its own title bar is the only one, and the
+// buttons in it drive the native window through `window.*` bridge methods. The preview keeps the
+// same bar so both surfaces look alike.
 const hosted = typeof window !== "undefined" && "chrome" in window;
 if (hosted) {
   document.documentElement.classList.add("hosted");
@@ -226,6 +228,7 @@ const ctx: AppContext = {
 
 const overview = createOverview(ctx);
 const appearance = createAppearanceScreen(ctx);
+const profiles = createProfilesScreen(ctx);
 const bar = createBarScreen(ctx);
 const zapret = createZapretScreen(ctx);
 const discord = createDiscordScreen(ctx);
@@ -281,6 +284,7 @@ const about = createAboutScreen(ctx);
 const screens: Record<ScreenId, Screen> = {
   overview,
   appearance,
+  profiles,
   zapret,
   discord,
   winmode,
@@ -699,10 +703,64 @@ function isTypingTarget(target: EventTarget | null): boolean {
 
 window.addEventListener("keydown", (event) => {
   const key = event.key;
+
+  // Esc closes the overlay in front of the page, and only that. The window itself deliberately has
+  // no Esc shortcut: on a settings window an accidental Esc must never throw away the page.
+  // The cancel event is dispatched so each dialog keeps its own semantics (the onboarding tour
+  // persists its skip, a confirm resolves `false`); a bare dialog closes by the platform default.
+  if (key === "Escape") {
+    const open = Array.from(document.querySelectorAll<HTMLDialogElement>("dialog[open]"));
+    const top = open.at(-1);
+    if (top) {
+      event.preventDefault();
+      if (top.dispatchEvent(new Event("cancel", { cancelable: true }))) {
+        top.close();
+      }
+    }
+
+    return;
+  }
+
+  // Window chords mirror the title-bar buttons. They are handled on `keydown`, before WebView2's
+  // own accelerator table sees them, so Ctrl+W cannot close the webview behind the bridge's back.
+  // Chords match the physical key (`event.code`), not the letter the active layout produces: on a
+  // Russian layout Ctrl+W arrives as `key: "ц"`, and a shortcut that only works in English would
+  // be a bug for most of this product's users.
+  if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey) {
+    const chord = key.toLowerCase();
+    if (event.code === "KeyW" || chord === "w") {
+      event.preventDefault();
+      void host.call("window.close");
+      return;
+    }
+
+    if (event.code === "KeyM" || chord === "m") {
+      event.preventDefault();
+      if (!event.repeat) {
+        void host.call("window.minimize");
+      }
+      return;
+    }
+  }
+
+  if (key === "F11" && !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey) {
+    event.preventDefault();
+    if (!event.repeat) {
+      void host.call("window.toggleMaximize");
+    }
+    return;
+  }
+
   const plain = !event.ctrlKey && !event.altKey && !event.metaKey;
 
   // Ctrl+K toggles the palette from anywhere; while it is open the same chord closes it.
-  if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && key.toLowerCase() === "k") {
+  if (
+    event.ctrlKey &&
+    !event.altKey &&
+    !event.metaKey &&
+    !event.shiftKey &&
+    (event.code === "KeyK" || key.toLowerCase() === "k")
+  ) {
     event.preventDefault();
     if (palette.isOpen) {
       palette.close();
