@@ -1,17 +1,17 @@
 {
-  "version": "0.4.0",
+  "version": "0.4.1",
   "channel": "beta",
   "released": "2026-11-19",
-  "notes": "Pro-клиент: вход через Discord, Ed25519-права, DPAPI-хранение, офлайн-грейс 30 дней. Windhawk: каталог 946 модов, установка/удаление. Исправления QA: WebView2Loader.dll в поставке, BOM в конфиге оконного менеджера, закрытие окна вместе с супервизором. Бэкенд Pro с loopback-авторизацией и скриптом деплоя.",
+  "notes": "Одна шапка окна вместо двух. Супервизор подбирает уже запущенные панель и обои после перезапуска, сверяет режим замены Windows с реестром после сбоя, диалог Что нового больше не блокирует панель.",
   "changelogUrl": "https://github.com/temajmix/ProjectNeb/blob/main/CHANGELOG.md",
   "assets": {
     "portable": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.4.0/ProjectNeb-0.4.0-beta-portable.zip",
-      "sha256": "5C91F351F5CC5F5719FE4E8657772D37C163617C18577A1E5509732346FAAA15"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.4.1/ProjectNeb-0.4.1-beta-portable.zip",
+      "sha256": "0232A71A2D9B61F1E68E71B243B5AD731E920BB2C8CB2BCF2B867F77C3AB2BA8"
     },
     "setup": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.4.0/ProjectNeb-0.4.0-beta-setup.exe",
-      "sha256": "3DD448604FFE9F0755758F3EC05A9F952BD0F653AA16CBB598C3696F400044E2"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.4.1/ProjectNeb-0.4.1-beta-setup.exe",
+      "sha256": "124D9FF37A1B395FC40492C9073DB68073D321B7C8F03BAAFF971FD47692209C"
     }
   }
 }
