@@ -1,0 +1,46 @@
+/* Design tokens. Values are part of the phase-1 visual contract: change them here, never inline. */
+:root {
+  /* Window background: the colour WPF paints before WebView2 has rendered anything
+     (`MainWindow.View.DefaultBackgroundColor`), reused as the page's own base so the first frame and
+     the dashboard can never flash different shades. */
+  --window: #0b0a12;
+  --bg: var(--window);
+  --bg-glow: #1a1030;
+  --glass: rgba(255, 255, 255, 0.055);
+  --glass-strong: rgba(255, 255, 255, 0.085);
+  --stroke: rgba(255, 255, 255, 0.1);
+  --stroke-soft: rgba(255, 255, 255, 0.06);
+
+  /* Glass depth: a top-lit fill plus an inner hairline, so a surface still reads as a pane of glass
+     where `backdrop-filter` has no bloom to blur. */
+  --glass-fill: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  --shadow-card: 0 18px 40px -28px rgba(0, 0, 0, 0.8);
+  --shadow-lift: 0 26px 48px -26px rgba(0, 0, 0, 0.9);
+  --lift: translateY(-1px);
+  --text: #f6f4ff;
+  --text-dim: #b7b3c9;
+  --text-mute: #7e7a92;
+  --accent: #a78bfa;
+  --accent-2: #7c5cff;
+  --green: #3ddc97;
+  --warn: #f0b45f;
+  --danger: #ff6b6b;
+  --r-xl: 24px;
+  --r-lg: 18px;
+  --r-md: 14px;
+  --r-sm: 10px;
+  --side: 236px;
+  --side-rail: 76px;
+  --title: 56px;
+  --pad: 28px;
+  --font: Onest, system-ui, sans-serif;
+  --mono: "JetBrains Mono", monospace;
+
+  /* The window drag band height, injected from ui-contract.json at build time. */
+  --caption-band: __CAPTION_BAND__;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --speed: 160ms;
+  --speed-slow: 200ms;
+  --shadow-modal: 0 40px 80px -32px rgba(0, 0, 0, 0.95);
+}

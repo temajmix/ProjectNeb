@@ -5,7 +5,7 @@
 //! so a slow Win32 counter can never make the clock stutter, and a bar that repaints never waits for
 //! a sample.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -14,8 +14,8 @@ use neb_core::metrics::{Sample, Sampler};
 
 use crate::widgets::metrics::{Reading, UNKNOWN};
 
-/// How often a sample is taken, matching the C# bar.
-pub const INTERVAL: Duration = Duration::from_secs(2);
+/// How often a sample is taken when no profile says otherwise; the balanced profile's interval.
+pub const INTERVAL: Duration = Duration::from_millis(1_000);
 
 /// How long the worker sleeps at a time while it waits, so stopping it is quick.
 const TICK: Duration = Duration::from_millis(50);
@@ -29,6 +29,9 @@ pub struct Metrics {
     ram_percent: AtomicU32,
     /// Memory in use in mebibytes.
     ram_mb: AtomicU32,
+    /// Milliseconds between two samples; the performance profile writes this and the worker reads
+    /// it every pass, so `shell.reload` changes the cadence without restarting the thread.
+    interval_ms: AtomicU64,
     running: AtomicBool,
     targets: Mutex<Vec<isize>>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -65,6 +68,7 @@ impl Metrics {
             cpu_percent: AtomicU32::new(0),
             ram_percent: AtomicU32::new(UNKNOWN),
             ram_mb: AtomicU32::new(0),
+            interval_ms: AtomicU64::new(INTERVAL.as_millis() as u64),
             running: AtomicBool::new(true),
             targets: Mutex::new(Vec::new()),
             worker: Mutex::new(None),
@@ -92,6 +96,20 @@ impl Metrics {
         let mut targets = self.targets.lock().unwrap_or_else(|lock| lock.into_inner());
         targets.clear();
         targets.extend_from_slice(bars);
+    }
+
+    /// Changes how often the worker samples, without stopping it.
+    ///
+    /// Called from the UI thread on start and on every `shell.reload`; the worker reads the
+    /// interval each pass, so the next sample follows the new profile.
+    pub fn set_interval(&self, interval: Duration) {
+        let millis = u64::try_from(interval.as_millis()).unwrap_or(u64::MAX);
+        self.interval_ms.store(millis.max(1), Ordering::SeqCst);
+    }
+
+    /// The interval the worker is currently honouring.
+    pub fn interval(&self) -> Duration {
+        Duration::from_millis(self.interval_ms.load(Ordering::SeqCst).max(1))
     }
 
     /// The latest reading, for the IPC surface.
@@ -124,7 +142,8 @@ impl Metrics {
         }
     }
 
-    /// The worker's whole life: prime the sampler, then publish a reading every [`INTERVAL`].
+    /// The worker's whole life: prime the sampler, then publish a reading every
+    /// [`interval`](Self::interval).
     fn sample_forever(&self) {
         let mut sampler = Sampler::new();
 
@@ -136,7 +155,7 @@ impl Metrics {
         let mut last = Instant::now();
         while self.running.load(Ordering::SeqCst) {
             thread::sleep(TICK);
-            if last.elapsed() < INTERVAL {
+            if last.elapsed() < self.interval() {
                 continue;
             }
 
@@ -246,6 +265,27 @@ mod tests {
         assert_eq!(*metrics.targets.lock().expect("lock"), vec![1, 2]);
         metrics.set_targets(&[3]);
         assert_eq!(*metrics.targets.lock().expect("lock"), vec![3]);
+
+        metrics.stop();
+    }
+
+    #[test]
+    fn the_interval_is_read_live_and_never_zero() {
+        let metrics = Metrics::start();
+        assert_eq!(metrics.interval(), INTERVAL);
+
+        metrics.set_interval(Duration::from_millis(500));
+        assert_eq!(metrics.interval(), Duration::from_millis(500));
+
+        metrics.set_interval(Duration::from_millis(2_000));
+        assert_eq!(metrics.interval(), Duration::from_secs(2));
+
+        metrics.set_interval(Duration::ZERO);
+        assert_eq!(
+            metrics.interval(),
+            Duration::from_millis(1),
+            "a zero interval would spin the worker"
+        );
 
         metrics.stop();
     }

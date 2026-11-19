@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use neb_core::config::WallpaperSettings;
+use neb_core::config::{Performance, WallpaperSettings};
 use neb_core::ipc::ServerHandle;
 use neb_core::logging::{self, LogHandle};
 use neb_core::metrics::working_set_bytes;
@@ -184,6 +184,8 @@ struct App {
     log: Option<LogHandle>,
     shared: Arc<Shared>,
     settings: WallpaperSettings,
+    /// The resolved performance profile; its frame rate drives the loop's deadline.
+    performance: Performance,
     palette: Palette,
     surfaces: Vec<Surface>,
     /// The scene clock, in seconds since the first frame.
@@ -219,13 +221,17 @@ pub fn run(args: Args) -> Result<Report, AppError> {
         );
     }
 
-    let settings = config::load(log.as_ref());
+    let config::Settings {
+        wallpaper: settings,
+        performance,
+    } = config::load(log.as_ref());
     let palette = Palette::from_colour(&settings.color);
     let instance = window::instance();
     let control = window::create_control(instance)?;
 
     let shared = Arc::new(Shared::new(control));
     shared.set_colour(&settings.color);
+    shared.set_fps(performance.wallpaper_fps);
 
     // The pipe comes up before the first frame, so a dashboard that connects immediately finds a
     // wallpaper that is already drawing.
@@ -291,6 +297,7 @@ pub fn run(args: Args) -> Result<Report, AppError> {
         log,
         shared,
         settings,
+        performance,
         palette,
         surfaces: Vec::new(),
         time: 0.0,
@@ -639,15 +646,36 @@ impl App {
 
     /// Re-reads `config.json` and rebuilds the palette without a restart.
     fn reload(&mut self) {
-        self.settings = config::load(self.log.as_ref());
+        let config::Settings {
+            wallpaper,
+            performance,
+        } = config::load(self.log.as_ref());
+        let previous = self.performance.wallpaper_fps;
+
+        self.settings = wallpaper;
+        self.performance = performance;
         self.palette = Palette::from_colour(&self.settings.color);
         self.shared.set_colour(&self.settings.color);
+        self.shared.set_fps(performance.wallpaper_fps);
         self.info(&format!(
-            "reloaded: colour {}, pause on fullscreen={}, pause on battery={}",
+            "reloaded: colour {}, pause on fullscreen={}, pause on battery={}, profile '{}' at \
+             {} fps",
             config::normalise_colour(&self.settings.color),
             self.settings.pause_on_fullscreen,
-            self.settings.pause_on_battery
+            self.settings.pause_on_battery,
+            performance.profile.as_str(),
+            performance.wallpaper_fps
         ));
+
+        if performance.wallpaper_fps != previous {
+            // The deadline was computed from the old rate; starting the new cadence now rather than
+            // finishing the old interval is what makes a slow profile feel immediate.
+            self.next_frame = Instant::now();
+            self.info(&format!(
+                "frame rate {previous} -> {} fps",
+                performance.wallpaper_fps
+            ));
+        }
 
         self.apply_pause();
     }
@@ -670,7 +698,9 @@ impl App {
 
             if !self.paused && now >= self.next_frame {
                 self.draw_frame();
-                self.next_frame = now + frame_interval();
+                // Read the shared rate every frame: a reload updates the atomic, so the very next
+                // deadline uses the new profile without recreating anything.
+                self.next_frame = now + frame_interval(self.shared.fps());
             }
 
             if let Some(after) = report_after {
@@ -802,9 +832,12 @@ fn present(surface: &mut Surface, time: f32, palette: &Palette) -> Result<(), Re
     Ok(())
 }
 
-/// The frame interval the scene targets.
-fn frame_interval() -> Duration {
-    Duration::from_millis(1000 / u64::from(config::FRAMES_PER_SECOND))
+/// The frame interval one profile asks for.
+///
+/// Fractional seconds rather than integer milliseconds: 30 fps is 33.3 ms, and flooring it to 33
+/// would quietly turn the balanced profile into 30.3 fps while quality would run at 62.5.
+fn frame_interval(fps: u32) -> Duration {
+    Duration::from_secs_f64(1.0 / f64::from(fps.max(1)))
 }
 
 /// Makes this process DPI aware *before* any window exists, so every rectangle is physical pixels.
@@ -881,10 +914,31 @@ mod tests {
     }
 
     #[test]
-    fn the_frame_interval_is_thirty_a_second() {
-        assert_eq!(frame_interval(), Duration::from_millis(33));
+    fn the_frame_interval_follows_the_performance_profile() {
+        // Every profile's documented rate, plus the floor a hand-edited zero lands on.
+        for (fps, millis) in [(10, 100.0), (30, 33.333), (60, 16.666), (0, 1_000.0)] {
+            let interval = frame_interval(fps).as_secs_f64() * 1_000.0;
+            assert!(
+                (interval - millis).abs() < 0.01,
+                "{fps} fps must be {millis} ms, got {interval}"
+            );
+        }
+
         assert_eq!(PAUSE_INTERVAL, Duration::from_secs(1));
         assert_eq!(DEBOUNCE, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn a_profile_reload_changes_the_rate_the_loop_reads() {
+        let shared = Shared::new(HWND::default());
+        assert_eq!(shared.fps(), config::FRAMES_PER_SECOND);
+
+        // What `wallpaper.reload` does after re-reading a file that says `performance`.
+        shared.set_fps(neb_core::config::PerformanceProfile::Performance.wallpaper_fps());
+        assert!((frame_interval(shared.fps()).as_secs_f64() - 0.1).abs() < 1e-9);
+
+        shared.set_fps(neb_core::config::PerformanceProfile::Quality.wallpaper_fps());
+        assert!((frame_interval(shared.fps()).as_secs_f64() - 1.0 / 60.0).abs() < 1e-9);
     }
 
     #[test]

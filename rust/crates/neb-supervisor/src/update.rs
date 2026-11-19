@@ -234,8 +234,20 @@ impl Default for Settings {
 
 impl Settings {
     /// Reads the `updates` object out of an already parsed `config.json`.
+    ///
+    /// The performance profile supplies the default interval, `performance.updateCheckHours`
+    /// overrides it, and the older explicit `updates.checkHours` still wins so an installation that
+    /// already chose an interval keeps it.
     pub fn from_json(config: &Value) -> Self {
         let mut settings = Self::default();
+
+        if let Some(performance) = config.get("performance")
+            && let Ok(performance) =
+                serde_json::from_value::<neb_core::config::PerformanceSettings>(performance.clone())
+        {
+            settings.check_hours = performance.resolved().update_check_hours;
+        }
+
         let Some(section) = config.get("updates") else {
             return settings;
         };
@@ -1734,6 +1746,48 @@ mod tests {
         assert_eq!(settings.check_hours, 6);
         assert!(settings.auto_apply);
         assert_eq!(settings.interval(), Duration::from_secs(6 * 60 * 60));
+    }
+
+    #[test]
+    fn the_performance_profile_sets_the_check_interval() {
+        for (profile, hours) in [("performance", 24), ("balanced", 6), ("quality", 6)] {
+            let text = format!(r#"{{"performance":{{"profile":"{profile}"}}}}"#);
+            let settings = Settings::from_text(&text);
+
+            assert_eq!(settings.check_hours, hours, "{profile}");
+            assert_eq!(
+                settings.interval(),
+                Duration::from_secs(hours * 60 * 60),
+                "{profile}"
+            );
+        }
+
+        assert_eq!(
+            Settings::from_text(r#"{"performance":{"profile":"turbo"}}"#).check_hours,
+            DEFAULT_CHECK_HOURS,
+            "an unknown profile falls back to balanced"
+        );
+    }
+
+    #[test]
+    fn the_check_interval_override_beats_the_profile_and_a_legacy_key_beats_both() {
+        let profile_only = Settings::from_text(
+            r#"{"performance":{"profile":"performance","updateCheckHours":12}}"#,
+        );
+        assert_eq!(profile_only.check_hours, 12);
+
+        let legacy = Settings::from_text(
+            r#"{"performance":{"profile":"performance","updateCheckHours":12},
+                "updates":{"checkHours":2}}"#,
+        );
+        assert_eq!(
+            legacy.check_hours, 2,
+            "an explicit updates.checkHours is kept"
+        );
+
+        let clamped =
+            Settings::from_text(r#"{"performance":{"profile":"quality","updateCheckHours":0}}"#);
+        assert_eq!(clamped.check_hours, MIN_CHECK_HOURS);
     }
 
     #[test]

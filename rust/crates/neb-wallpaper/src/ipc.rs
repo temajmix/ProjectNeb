@@ -40,6 +40,9 @@ pub struct Shared {
     presenting: AtomicBool,
     /// Frames presented since start, summed over the surfaces.
     frames: AtomicU64,
+    /// Frames per second the loop is currently targeting. The loop reads this every frame, so a
+    /// `wallpaper.reload` that changes the performance profile takes effect without a restart.
+    fps: AtomicU32,
     /// The last sampled pause inputs.
     fullscreen: AtomicBool,
     on_battery: AtomicBool,
@@ -63,6 +66,7 @@ impl Shared {
             // "not presenting" is a state only a real pause puts it in.
             presenting: AtomicBool::new(true),
             frames: AtomicU64::new(0),
+            fps: AtomicU32::new(crate::config::FRAMES_PER_SECOND),
             fullscreen: AtomicBool::new(false),
             on_battery: AtomicBool::new(false),
             locked: AtomicBool::new(false),
@@ -111,6 +115,16 @@ impl Shared {
         self.frames.fetch_add(frames, Ordering::Relaxed);
     }
 
+    /// Records the frame rate the loop targets.
+    pub fn set_fps(&self, fps: u32) {
+        self.fps.store(fps.max(1), Ordering::Relaxed);
+    }
+
+    /// The frame rate the loop reads for its next deadline.
+    pub fn fps(&self) -> u32 {
+        self.fps.load(Ordering::Relaxed).max(1)
+    }
+
     /// Records the colour the scene is built from.
     pub fn set_colour(&self, colour: &str) {
         if let Ok(mut current) = self.colour.lock() {
@@ -137,6 +151,7 @@ impl Shared {
             "slot": slot_name(self.slot_kind.load(Ordering::Relaxed)),
             "monitors": self.monitors.load(Ordering::Relaxed),
             "frames": self.frames.load(Ordering::Relaxed),
+            "fps": self.fps.load(Ordering::Relaxed).max(1),
             "fullscreen": self.fullscreen.load(Ordering::Relaxed),
             "onBattery": self.on_battery.load(Ordering::Relaxed),
             "locked": self.locked.load(Ordering::Relaxed),
@@ -309,6 +324,33 @@ mod tests {
 
         assert_eq!(shared.state()["frames"], json!(7));
         assert_eq!(shared.state()["color"], json!("#aabbcc"));
+    }
+
+    #[test]
+    fn the_frame_rate_is_an_atomic_the_loop_and_a_reload_share() {
+        let shared = shared();
+        assert_eq!(
+            shared.state()["fps"],
+            json!(crate::config::FRAMES_PER_SECOND)
+        );
+
+        shared.set_fps(10);
+        assert_eq!(shared.fps(), 10);
+        assert_eq!(shared.state()["fps"], json!(10));
+
+        shared.set_fps(60);
+        assert_eq!(
+            shared.fps(),
+            60,
+            "a reload changes what the next frame reads"
+        );
+
+        shared.set_fps(0);
+        assert_eq!(
+            shared.fps(),
+            1,
+            "a zero rate would stop the clock, not pause it"
+        );
     }
 
     #[test]

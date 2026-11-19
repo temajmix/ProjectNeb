@@ -1,0 +1,17 @@
+{
+  "name": "neb-ui",
+  "private": true,
+  "version": "0.3.0",
+  "type": "module",
+  "description": "ProjectNeb dashboard (Vite + TypeScript, no UI framework)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173 --strictPort",
+    "fonts": "node scripts/fetch-fonts.mjs"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "vite": "^7.1.0"
+  }
+}

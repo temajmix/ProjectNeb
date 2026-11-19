@@ -289,6 +289,7 @@ fn create_test_dock() -> windows::Win32::Foundation::HWND {
         auto_hide: false,
         tile_dip: neb_shell::dock::layout::TILE_DIP,
         animations: Default::default(),
+        poll_ms: neb_shell::dock::autohide::POLL_MS,
         host: neb_shell::dock::window::windows(),
     })
     .expect("the dock must be created")

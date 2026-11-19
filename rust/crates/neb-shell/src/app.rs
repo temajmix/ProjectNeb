@@ -213,8 +213,32 @@ struct App {
     hotkey: Option<&'static str>,
     /// The bar's widget list, parsed once per configuration reload.
     widgets: Vec<WidgetSpec>,
-    /// The user's motion preferences.
+    /// The user's motion preferences, already combined with the performance profile.
     animations: AnimationSettings,
+    /// The dock's pointer/fullscreen poll period.
+    dock_poll_ms: u32,
+}
+
+/// The parts of the resolved performance profile the shell applies.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Pacing {
+    /// Motion, with the profile's switch folded into the user's `animations` section.
+    animations: AnimationSettings,
+    /// The dock's poll period, in milliseconds.
+    dock_poll_ms: u32,
+    /// The metrics worker's sample interval.
+    metrics: Duration,
+}
+
+/// Resolves the profile into the values the bar, the dock and the metrics worker use.
+fn pacing(config: &Config) -> Pacing {
+    let performance = config.resolved_performance();
+
+    Pacing {
+        animations: performance.animations_with(config.animations),
+        dock_poll_ms: u32::try_from(performance.dock_poll_ms).unwrap_or(u32::MAX),
+        metrics: Duration::from_millis(performance.metrics_ms),
+    }
 }
 
 impl App {
@@ -230,12 +254,14 @@ impl App {
         let theme = Theme::load(config.shell.theme(), crate::log());
         let visible = config.shell.bar_enabled;
         let pinned = dock::catalog::load(&config);
-        let (widgets, animations) = (parse_widgets(&config), config.animations);
+        let widgets = parse_widgets(&config);
+        let pacing = pacing(&config);
 
         let control = window::create_controller()?;
         let hotkey = launcher::window::register_hotkey(control);
 
         let metrics = Metrics::start();
+        metrics.set_interval(pacing.metrics);
         let shared = Arc::new(Shared::new(Arc::clone(&metrics)));
         let server = match ipc::start(Arc::clone(&shared)) {
             Ok(server) => Some(server),
@@ -263,7 +289,8 @@ impl App {
             launcher_previous: 0,
             hotkey,
             widgets,
-            animations,
+            animations: pacing.animations,
+            dock_poll_ms: pacing.dock_poll_ms,
         };
 
         if app.visible {
@@ -376,18 +403,25 @@ impl App {
         self.visible = self.config.shell.bar_enabled;
         self.pinned = dock::catalog::load(&self.config);
         self.widgets = parse_widgets(&self.config);
-        self.animations = self.config.animations;
+
+        let pacing = pacing(&self.config);
+        self.animations = pacing.animations;
+        self.dock_poll_ms = pacing.dock_poll_ms;
+        self.metrics.set_interval(pacing.metrics);
 
         crate::log_info!(
             "shell",
-            "reloaded: theme '{}', language '{}', visible {}, {} pinned app(s), {} widget(s), animations {} at {:.2}x",
+            "reloaded: theme '{}', language '{}', visible {}, {} pinned app(s), {} widget(s), \
+             animations {} at {:.2}x, dock poll {} ms, metrics every {} ms",
             self.theme.id,
             self.language.tag(),
             self.visible,
             self.pinned.len(),
             self.widgets.len(),
             if self.animations.enabled { "on" } else { "off" },
-            self.animations.speed()
+            self.animations.speed(),
+            self.dock_poll_ms,
+            pacing.metrics.as_millis()
         );
 
         self.relayout();
@@ -531,6 +565,7 @@ impl App {
             auto_hide: self.config.shell.dock_auto_hide,
             tile_dip: self.theme.dock_tile.unwrap_or(dock::layout::TILE_DIP),
             animations: self.animations,
+            poll_ms: self.dock_poll_ms,
             host: dock::window::windows(),
         };
 
@@ -812,6 +847,64 @@ mod tests {
         assert_eq!(
             parse(&["--fly"]),
             Err(ArgError::Unknown("--fly".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_profile_sets_motion_the_dock_poll_and_the_metrics_interval() {
+        let config = Config::default();
+        let balanced = pacing(&config);
+        assert!(balanced.animations.enabled);
+        assert_eq!(balanced.dock_poll_ms, 100);
+        assert_eq!(balanced.metrics, Duration::from_millis(1_000));
+
+        let mut config = Config::default();
+        config.performance.profile = neb_core::config::PerformanceProfile::Performance;
+        let performance = pacing(&config);
+        assert!(
+            !performance.animations.enabled,
+            "the profile turns motion off"
+        );
+        assert_eq!(performance.dock_poll_ms, 250);
+        assert_eq!(performance.metrics, Duration::from_millis(2_000));
+
+        config.performance.profile = neb_core::config::PerformanceProfile::Quality;
+        let quality = pacing(&config);
+        assert!(quality.animations.enabled);
+        assert_eq!(quality.dock_poll_ms, 60);
+        assert_eq!(quality.metrics, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn a_reload_is_just_a_second_pacing_call_with_the_new_config() {
+        let mut config = Config::default();
+        let before = pacing(&config);
+
+        // What `shell.reload` does after re-reading a file that switched to performance.
+        config.performance.profile = neb_core::config::PerformanceProfile::Performance;
+        let after = pacing(&config);
+
+        assert_ne!(before.dock_poll_ms, after.dock_poll_ms);
+        assert!(before.animations.enabled && !after.animations.enabled);
+        assert_ne!(before.metrics, after.metrics);
+    }
+
+    #[test]
+    fn the_user_animation_switch_and_overrides_still_win() {
+        let mut config = Config::default();
+        config.animations.enabled = false;
+        config.performance.animations = Some(true);
+        assert!(
+            !pacing(&config).animations.enabled,
+            "the animations section can still switch motion off"
+        );
+
+        let mut config = Config::default();
+        config.performance.profile = neb_core::config::PerformanceProfile::Quality;
+        config.performance.animations = Some(false);
+        assert!(
+            !pacing(&config).animations.enabled,
+            "an explicit performance.animations override wins over the profile"
         );
     }
 }

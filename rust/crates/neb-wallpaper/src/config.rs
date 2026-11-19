@@ -4,11 +4,12 @@
 //! [`WallpaperSettings`] object rather than declaring a second shape for it: whatever the dashboard
 //! writes is what the scene shows after `wallpaper.reload`.
 
-use neb_core::config::{ConfigStore, DEFAULT_WALLPAPER_COLOR, WallpaperSettings};
+use neb_core::config::{ConfigStore, DEFAULT_WALLPAPER_COLOR, Performance, WallpaperSettings};
 use neb_core::logging::LogHandle;
 
-/// Frames per second the scene is rendered at. The aurora drifts slowly; a faster clock would only
-/// burn battery.
+/// Frames per second the scene is rendered at before the performance profile is applied. The
+/// profile is what actually decides; this is the shipped balanced rate and the fallback for a
+/// profile file that cannot be read.
 pub const FRAMES_PER_SECOND: u32 = 30;
 
 /// Working set this process must stay under, in bytes.
@@ -17,29 +18,45 @@ pub const MEMORY_BUDGET: usize = 60 * 1024 * 1024;
 /// How long `--report-memory` idles before it reports.
 pub const REPORT_AFTER_SECONDS: u64 = 12;
 
-/// Reads the wallpaper settings from the shared configuration file.
+/// Everything the wallpaper loop reads from `config.json`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Settings {
+    /// The wallpaper's own preferences.
+    pub wallpaper: WallpaperSettings,
+    /// The resolved performance profile, i.e. the frame rate.
+    pub performance: Performance,
+}
+
+/// Reads the wallpaper settings and the resolved performance profile from the shared file.
 ///
 /// A missing or broken file is not an error: [`ConfigStore::load`] falls back to the shipped
 /// defaults, which is the same "nothing has been chosen yet" state the dashboard starts from.
-pub fn load(log: Option<&LogHandle>) -> WallpaperSettings {
+pub fn load(log: Option<&LogHandle>) -> Settings {
     let store = ConfigStore::at_default_location();
     let config = store.load();
+    let performance = config.resolved_performance();
     let settings = config.wallpapers;
 
     if let Some(log) = log {
         log.info(
             "wallpaper",
             &format!(
-                "settings from '{}': colour {}, pause on fullscreen={}, pause on battery={}",
+                "settings from '{}': colour {}, pause on fullscreen={}, pause on battery={}, \
+                 profile '{}' at {} fps",
                 store.path().display(),
                 normalise_colour(&settings.color),
                 settings.pause_on_fullscreen,
-                settings.pause_on_battery
+                settings.pause_on_battery,
+                performance.profile.as_str(),
+                performance.wallpaper_fps
             ),
         );
     }
 
-    settings
+    Settings {
+        wallpaper: settings,
+        performance,
+    }
 }
 
 /// The configured colour as `#rrggbb`, falling back to [`DEFAULT_WALLPAPER_COLOR`].

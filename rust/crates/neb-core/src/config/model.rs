@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::performance::{Performance, PerformanceSettings};
 use crate::windows_mode::WindowsModeSettings;
 
 /// Version of the on-disk shape this build writes; a future migration reads it to decide.
@@ -72,6 +73,12 @@ pub struct Config {
     pub shell: ShellSettings,
     /// Motion preferences every ProjectNeb surface honours.
     pub animations: AnimationSettings,
+    /// Performance profile and its per-key overrides.
+    ///
+    /// Additive to the C# contract: the other build ignores the key, and an absent object means
+    /// [`PerformanceSettings::default`], i.e. the balanced profile. Every process resolves it
+    /// through [`PerformanceSettings::resolved`], which clamps hand-edited values.
+    pub performance: PerformanceSettings,
     /// Discord Rich Presence preferences.
     ///
     /// Additive to the C# contract: the C# build ignores the key, and an absent object means
@@ -118,6 +125,7 @@ impl Default for Config {
             wallpapers: WallpaperSettings::default(),
             shell: ShellSettings::default(),
             animations: AnimationSettings::default(),
+            performance: PerformanceSettings::default(),
             discord: DiscordSettings::default(),
             windows_mode: WindowsModeSettings::default(),
             window_manager: WindowManagerSettings::default(),
@@ -126,6 +134,16 @@ impl Default for Config {
             account: AccountSettings::default(),
             extra: Map::new(),
         }
+    }
+}
+
+impl Config {
+    /// The performance profile with its overrides resolved and clamped.
+    ///
+    /// Every process reads this instead of individual `performance` keys, so a file that names an
+    /// unknown profile or an out-of-range override resolves the same way everywhere.
+    pub fn resolved_performance(&self) -> Performance {
+        self.performance.resolved()
     }
 }
 

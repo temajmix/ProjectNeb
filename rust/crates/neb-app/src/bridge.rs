@@ -24,7 +24,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, SystemTime};
 
-use neb_core::config::{Config, ConfigStore, DEFAULT_LANGUAGE, DEFAULT_THEME_ID, SCHEMA_VERSION};
+use neb_core::config::{
+    Config, ConfigStore, DEFAULT_LANGUAGE, DEFAULT_THEME_ID, PerformanceProfile, SCHEMA_VERSION,
+};
 use neb_core::ipc::IpcError;
 use neb_core::license::{account as account_api, ids, loopback, store};
 use neb_core::logging::{Level, LogHandle};
@@ -71,6 +73,27 @@ pub const WINDHAWK_PIPE: &str = "ProjectNeb.windhawk";
 /// The longest a bridge method may wait for another ProjectNeb process.
 pub const IPC_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long a pack import may take: a downloaded pack is dozens of megabytes of copied files.
+pub const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long `windhawk.install` may wait for the module before answering with an error.
+///
+/// The module downloads a source through the network and asks an elevated helper to write it; a
+/// user staring at a disabled button must get an answer either way, so the wait is capped.
+pub const WINDHAWK_INSTALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long `discord.configure` waits for the restarted module to answer its own state.
+pub const DISCORD_RESTART_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Shortest Discord application id accepted by `discord.configure`.
+pub const APP_ID_MIN_DIGITS: usize = 17;
+
+/// Longest Discord application id accepted by `discord.configure`.
+pub const APP_ID_MAX_DIGITS: usize = 20;
+
+/// The folder a downloaded zapret pack is known to land in on this machine.
+pub const FIXED_PACK_PATH: &str = r"A:\zapret-discord-youtube-main";
+
 /// How long a presence probe may take when the supervisor is not the one answering.
 ///
 /// Five probes on the metrics path would otherwise cost five full seconds on a machine where
@@ -107,6 +130,96 @@ pub type Opener = fn(&str) -> Result<(), String>;
 /// Asks the user for a wallpaper file; `None` means the dialog was cancelled.
 pub type Picker = fn(Option<isize>) -> Result<Option<String>, String>;
 
+/// Asks the user for a folder; `None` means the dialog was cancelled.
+pub type FolderPicker = fn(Option<isize>) -> Result<Option<String>, String>;
+
+/// The folders `zapret.detectPack` searches, in the order it tries them.
+///
+/// The struct is a value, not a call to the environment, so a test can point it at a temporary
+/// tree and prove the ordering and the one-level Downloads scan without touching the real profile.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackSearch {
+    /// Explicit folders that are always checked, e.g. the known `A:\` download.
+    pub fixed: Vec<PathBuf>,
+    /// `%USERPROFILE%\Downloads`; scanned one level deep for a `bin\winws.exe`.
+    pub downloads: Option<PathBuf>,
+    /// `%LOCALAPPDATA%`; `ProjectNeb\zapret` under it is ProjectNeb's own import target.
+    pub local_app_data: Option<PathBuf>,
+}
+
+impl PackSearch {
+    /// The real folders of this session.
+    pub fn from_env() -> Self {
+        Self {
+            fixed: vec![PathBuf::from(FIXED_PACK_PATH)],
+            downloads: std::env::var_os("USERPROFILE")
+                .map(|profile| PathBuf::from(profile).join("Downloads")),
+            local_app_data: std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+        }
+    }
+
+    /// Every candidate folder, most specific first and without duplicates.
+    ///
+    /// The named folders come first because they are the documented places; a one-level scan of
+    /// Downloads follows, so a pack extracted under any other name is still found.
+    pub fn candidates(&self) -> Vec<PathBuf> {
+        let mut list = Vec::new();
+
+        for path in &self.fixed {
+            push_unique(&mut list, path.clone());
+        }
+
+        if let Some(downloads) = &self.downloads {
+            push_unique(&mut list, downloads.join("zapret-discord-youtube-main"));
+        }
+
+        if let Some(local) = &self.local_app_data {
+            push_unique(&mut list, local.join("ProjectNeb").join("zapret"));
+        }
+
+        if let Some(downloads) = &self.downloads {
+            let mut found = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(downloads) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() && path.join("bin").join("winws.exe").is_file() {
+                        found.push(path);
+                    }
+                }
+            }
+
+            found.sort();
+            for path in found {
+                push_unique(&mut list, path);
+            }
+        }
+
+        list
+    }
+}
+
+/// Appends `path` unless an equal folder (case-insensitively, as Windows compares them) is there.
+fn push_unique(list: &mut Vec<PathBuf>, path: PathBuf) {
+    if list.iter().any(|known| {
+        known
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&path.to_string_lossy())
+    }) {
+        return;
+    }
+
+    list.push(path);
+}
+
+/// Whether `root` holds the two files every strategy needs.
+///
+/// This is the same rule the module applies before it copies anything; checking it here keeps a
+/// typo in Downloads from turning into a half-imported folder.
+pub fn is_pack(root: &Path) -> bool {
+    root.join("bin").join("winws.exe").is_file()
+        && root.join("bin").join("WinDivert64.sys").is_file()
+}
+
 /// Everything a method needs, with the parts that differ in tests passed in.
 #[derive(Debug, Clone)]
 pub struct Context {
@@ -132,6 +245,10 @@ pub struct Context {
     pub windhawk_pipe: String,
     /// How long one IPC call may take.
     pub timeout: Duration,
+    /// How long a pack import may take; a copy of a downloaded pack is slower than a state read.
+    pub import_timeout: Duration,
+    /// Folders `zapret.detectPack` looks in.
+    pub pack_search: PackSearch,
     /// How long `account.signIn` waits for the browser callback.
     pub sign_in_timeout: Duration,
     /// Name this installation reports as a licence device.
@@ -142,6 +259,8 @@ pub struct Context {
     pub opener: Opener,
     /// Asks for a wallpaper file.
     pub picker: Picker,
+    /// Asks for a folder, e.g. an unpacked zapret pack.
+    pub folder_picker: FolderPicker,
 }
 
 impl Context {
@@ -164,11 +283,14 @@ impl Context {
             wm_pipe: WM_PIPE.to_owned(),
             windhawk_pipe: WINDHAWK_PIPE.to_owned(),
             timeout: IPC_TIMEOUT,
+            import_timeout: IMPORT_TIMEOUT,
+            pack_search: PackSearch::from_env(),
             sign_in_timeout: SIGN_IN_TIMEOUT,
             device_name: default_device_name(),
             log,
             opener: shell_open,
             picker: pick_wallpaper_file,
+            folder_picker: pick_folder_dialog,
         }
     }
 
@@ -190,11 +312,14 @@ impl Context {
             wm_pipe: unused(WM_PIPE),
             windhawk_pipe: unused(WINDHAWK_PIPE),
             timeout: Duration::from_millis(500),
+            import_timeout: Duration::from_millis(500),
+            pack_search: PackSearch::default(),
             sign_in_timeout: SIGN_IN_TIMEOUT,
             device_name: "test-device".to_owned(),
             log: None,
             opener: |_| Ok(()),
             picker: |_| Ok(None),
+            folder_picker: |_| Ok(None),
         }
     }
 
@@ -392,16 +517,15 @@ fn dispatch_inner(context: &Context, job: &Job) -> Result<Value, MethodError> {
     }
 
     if method.starts_with("windhawk.") {
-        return module_call(
-            &context.windhawk_pipe,
-            method,
-            optional_params(&job.params),
-            context.timeout,
-        );
+        return windhawk(context, method, &job.params);
     }
 
     if method.starts_with("account.") {
         return account(context, method);
+    }
+
+    if method.starts_with("performance.") {
+        return performance(context, method, &job.params);
     }
 
     match method {
@@ -1104,6 +1228,76 @@ fn open_logs_folder(context: &Context) -> Result<Value, MethodError> {
     Ok(json!({ "ok": true, "path": path }))
 }
 
+/// `performance.get` and `performance.set`: the resolved profile every process applies.
+///
+/// The document a consumer reads has no optional fields; see
+/// [`neb_core::config::Performance`]. A set persists the profile and then asks the shell to reload
+/// and the supervisor to restart the wallpaper, because both read the profile at start and on
+/// reload. Neither process being down is a reason to fail a save that already reached the disk.
+fn performance(context: &Context, method: &str, params: &Value) -> Result<Value, MethodError> {
+    match method {
+        "performance.get" => {
+            let config = context
+                .store
+                .load_checked()
+                .map_err(|error| format!("cannot read the config: {error}"))?;
+
+            performance_payload(config.resolved_performance())
+        }
+        "performance.set" => set_performance(context, params),
+        other => Err(format!("unknown method '{other}'")),
+    }
+}
+
+/// `performance.set {profile}`: persist, refresh the live processes, answer the resolved values.
+fn set_performance(context: &Context, params: &Value) -> Result<Value, MethodError> {
+    let requested = params
+        .get("profile")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "'performance.set' needs a 'profile' of 'performance', 'balanced' or 'quality'"
+                .to_owned()
+        })?;
+    let profile = PerformanceProfile::parse(requested)
+        .ok_or_else(|| format!("unknown performance profile '{requested}'"))?;
+
+    let mut config = context
+        .store
+        .load_checked()
+        .map_err(|error| format!("cannot read the config: {error}"))?;
+    config.performance.profile = profile;
+    context
+        .store
+        .save(&config)
+        .map_err(|error| format!("cannot save the config: {error}"))?;
+
+    let resolved = config.resolved_performance();
+
+    // The shell re-reads the profile on `shell.reload`; the wallpaper gets a fresh process. Both
+    // failures are logged rather than returned: the choice is already durable and the next restart
+    // will honour it.
+    if let Err(error) = shell_call(context, "shell.reload") {
+        context.log(
+            Level::Warn,
+            &format!("performance.set: the shell did not reload: {error}"),
+        );
+    }
+
+    if let Err(error) = restart_child(context, "wallpaper") {
+        context.log(
+            Level::Warn,
+            &format!("performance.set: the wallpaper did not restart: {error}"),
+        );
+    }
+
+    performance_payload(resolved)
+}
+
+/// The resolved profile as the dashboard reads it.
+fn performance_payload(performance: neb_core::config::Performance) -> Result<Value, MethodError> {
+    serde_json::to_value(performance).map_err(|error| error.to_string())
+}
+
 /// `app.restartShell` and the wallpaper equivalent: one `app.restartChild` on the supervisor.
 fn restart_child(context: &Context, name: &str) -> Result<Value, MethodError> {
     let timeout = context.timeout.max(RESTART_TIMEOUT);
@@ -1129,16 +1323,29 @@ fn windows(context: &Context, method: &str, params: &Value) -> Result<Value, Met
 
 /// `zapret.*`: the module's own document, or an honest "off" state while the module is disabled.
 fn zapret(context: &Context, method: &str, params: &Value) -> Result<Value, MethodError> {
+    match method {
+        "zapret.pickPack" => return pick_pack(context),
+        "zapret.detectPack" => return detect_pack(context),
+        _ => {}
+    }
+
     let target = match method {
         "zapret.status" => "zapret.getState",
         other => other,
+    };
+
+    // Copying a downloaded pack is tens of megabytes; a state read is a few bytes.
+    let timeout = if target == "zapret.import" {
+        context.import_timeout
+    } else {
+        context.timeout
     };
 
     let call = module_call(
         &context.zapret_pipe,
         target,
         optional_params(params),
-        context.timeout,
+        timeout,
     );
 
     match call {
@@ -1154,6 +1361,81 @@ fn zapret(context: &Context, method: &str, params: &Value) -> Result<Value, Meth
         }
         Err(error) => Err(error),
     }
+}
+
+/// `zapret.pickPack`: ask for a folder, then hand it to the module's own importer.
+///
+/// The copy itself stays in the module: it owns the data directory and the validation rule, and
+/// the bridge only moves the chosen string across the pipe.
+fn pick_pack(context: &Context) -> Result<Value, MethodError> {
+    let chosen = (context.folder_picker)(context.window)
+        .map_err(|error| format!("zapret.pickPack: {error}"))?;
+
+    let Some(path) = chosen else {
+        return Ok(json!({ "cancelled": true }));
+    };
+
+    let state = import_pack(context, &path)?;
+
+    Ok(json!({
+        "cancelled": false,
+        "path": path,
+        "state": state,
+    }))
+}
+
+/// `zapret.detectPack`: import the first candidate folder that looks like a pack.
+///
+/// A missing pack is not an error, it is the answer `{found:false}`; the screen then offers the
+/// folder picker. An import that the module refuses is kept as an error, because a folder that
+/// passed the local check and still failed is worth showing instead of silently skipping.
+fn detect_pack(context: &Context) -> Result<Value, MethodError> {
+    for candidate in context.pack_search.candidates() {
+        if !is_pack(&candidate) {
+            continue;
+        }
+
+        let path = candidate.display().to_string();
+
+        match import_pack(context, &path) {
+            Ok(state) => {
+                return Ok(json!({
+                    "found": true,
+                    "path": path,
+                    "state": state,
+                }));
+            }
+            Err(error) if error.contains("already the import target") => {
+                // The candidate *is* ProjectNeb's own folder: it is imported already, so the
+                // current state is the honest answer instead of a refused copy onto itself.
+                let state = module_call(
+                    &context.zapret_pipe,
+                    "zapret.getState",
+                    None,
+                    context.timeout,
+                )?;
+
+                return Ok(json!({
+                    "found": true,
+                    "path": path,
+                    "state": state,
+                }));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(json!({ "found": false }))
+}
+
+/// Calls the module's importer with the long copy budget and returns its state document.
+fn import_pack(context: &Context, path: &str) -> Result<Value, MethodError> {
+    module_call(
+        &context.zapret_pipe,
+        "zapret.import",
+        Some(json!({ "path": path })),
+        context.import_timeout,
+    )
 }
 
 /// What `zapret.getState` answers while the module is off: nothing installed, nothing running.
@@ -1207,6 +1489,7 @@ fn discord(context: &Context, method: &str, params: &Value) -> Result<Value, Met
             None,
             context.timeout,
         ),
+        "discord.configure" => configure_discord(context, params),
         "discord.connect" => connect_discord(context, params),
         "discord.disconnect" => module_call(
             &context.discord_pipe,
@@ -1446,6 +1729,161 @@ fn module_call(
 ) -> Result<Value, MethodError> {
     neb_core::ipc::call(pipe, method, params, timeout)
         .map_err(|error| transport_error(method, error, MODULE_DOWN))
+}
+
+/// `discord.configure`: save the application id, then apply it by restarting the module.
+///
+/// The id is the whole handshake, and `neb-discord` reads it once at start, so writing the file
+/// alone would leave the running process on the old id. The supervisor restarts the child and the
+/// answer is the new module's own `discord.getState`; when the supervisor or the module is absent,
+/// a local document still says the id was saved.
+fn configure_discord(context: &Context, params: &Value) -> Result<Value, MethodError> {
+    let raw = params
+        .get("appId")
+        .or_else(|| params.get("applicationId"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let app_id = validate_app_id(raw)?;
+
+    let mut config = context
+        .store
+        .load_checked()
+        .map_err(|error| format!("cannot read the config: {error}"))?;
+
+    config.discord.app_id = app_id.to_owned();
+    config.discord.enabled = true;
+
+    context
+        .store
+        .save(&config)
+        .map_err(|error| format!("cannot save the config: {error}"))?;
+
+    // A missing supervisor is not a failed save: the next start of the module reads the new id.
+    let _ = restart_child(context, "discord");
+
+    if let Some(state) = wait_for_discord(context) {
+        return Ok(state);
+    }
+
+    Ok(json!({
+        "ok": true,
+        "state": "disconnected",
+        "configured": true,
+        "enabled": true,
+        "appId": app_id,
+        "message": Value::Null,
+        "lastError": Value::Null,
+        "activePreset": Value::Null,
+        "rules": 0,
+    }))
+}
+
+/// The module's state once the restarted child answers; `None` when it stays silent.
+fn wait_for_discord(context: &Context) -> Option<Value> {
+    let deadline = std::time::Instant::now() + DISCORD_RESTART_TIMEOUT;
+
+    loop {
+        if let Ok(state) = neb_core::ipc::call(
+            &context.discord_pipe,
+            "discord.getState",
+            None,
+            PRESENCE_TIMEOUT,
+        ) {
+            return Some(state);
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Accepts a Discord snowflake application id: digits only, 17 to 20 of them.
+fn validate_app_id(raw: &str) -> Result<&str, MethodError> {
+    let id = raw.trim();
+
+    if id.is_empty() {
+        return Err("'discord.configure' needs an 'appId'".to_owned());
+    }
+
+    if !id.bytes().all(|digit| digit.is_ascii_digit()) {
+        return Err("discord.configure: the application id is digits only".to_owned());
+    }
+
+    if id.len() < APP_ID_MIN_DIGITS || id.len() > APP_ID_MAX_DIGITS {
+        return Err(format!(
+            "discord.configure: the application id has {APP_ID_MIN_DIGITS} to \
+             {APP_ID_MAX_DIGITS} digits, got {}",
+            id.len()
+        ));
+    }
+
+    Ok(id)
+}
+
+/// `windhawk.*`: the module answers, except the install that needs a capped wait and one shape.
+fn windhawk(context: &Context, method: &str, params: &Value) -> Result<Value, MethodError> {
+    if method != "windhawk.install" {
+        return module_call(
+            &context.windhawk_pipe,
+            method,
+            optional_params(params),
+            context.timeout,
+        );
+    }
+
+    let outcome = neb_core::ipc::call(
+        &context.windhawk_pipe,
+        method,
+        optional_params(params),
+        WINDHAWK_INSTALL_TIMEOUT,
+    )
+    .map_err(|error| match error {
+        IpcError::Timeout { .. } => format!(
+            "windhawk.install did not answer within {} s",
+            WINDHAWK_INSTALL_TIMEOUT.as_secs()
+        ),
+        other => transport_error(method, other, MODULE_DOWN),
+    })?;
+
+    Ok(windhawk_install_result(&outcome))
+}
+
+/// The four fields the screen paints, with the module's own note kept as the message.
+fn windhawk_install_result(outcome: &Value) -> Value {
+    let installed = outcome
+        .get("installed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let enabled = outcome
+        .get("enabled")
+        .cloned()
+        .unwrap_or_else(|| json!("unknown"));
+    let needs_windhawk_ui = outcome
+        .get("needsWindhawkUi")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let message = outcome
+        .get("note")
+        .and_then(Value::as_str)
+        .filter(|note| !note.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            needs_windhawk_ui.then(|| "Windhawk must be opened once to enable the mod".to_owned())
+        });
+
+    json!({
+        "id": outcome.get("id").cloned().unwrap_or(Value::Null),
+        "installed": installed,
+        "enabled": enabled,
+        "needsWindhawkUi": needs_windhawk_ui,
+        "message": message,
+        "sourcePath": outcome.get("sourcePath").cloned().unwrap_or(Value::Null),
+    })
 }
 
 /// Connects Discord, adopting an application id typed into the window first.
@@ -2115,6 +2553,109 @@ fn pick_wallpaper_file(window: Option<isize>) -> Result<Option<String>, String> 
     }
 }
 
+/// Asks for a folder with the modern Vista dialog, which is the only one that can pick one.
+///
+/// The bridge worker is not a COM apartment, and a shell dialog must run in a single-threaded one,
+/// so the dialog gets a thread of its own; `WM_CLOSE` from the user is the ordinary cancel path.
+fn pick_folder_dialog(window: Option<isize>) -> Result<Option<String>, String> {
+    let owner = window.unwrap_or_default();
+
+    let thread = std::thread::Builder::new()
+        .name("neb-folder-picker".to_owned())
+        .spawn(move || show_folder_dialog(owner))
+        .map_err(|error| format!("cannot start the folder dialog: {error}"))?;
+
+    thread
+        .join()
+        .map_err(|_| "the folder dialog thread panicked".to_owned())?
+}
+
+/// The options `IFileOpenDialog` is shown with: folders only, existing filesystem paths.
+fn folder_dialog_options(
+    current: windows::Win32::UI::Shell::FILEOPENDIALOGOPTIONS,
+) -> windows::Win32::UI::Shell::FILEOPENDIALOGOPTIONS {
+    use windows::Win32::UI::Shell::{
+        FILEOPENDIALOGOPTIONS, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
+        FOS_PICKFOLDERS,
+    };
+
+    let bits = (current.0 | FOS_PICKFOLDERS.0 | FOS_FORCEFILESYSTEM.0 | FOS_PATHMUSTEXIST.0)
+        & !FOS_FILEMUSTEXIST.0;
+
+    FILEOPENDIALOGOPTIONS(bits)
+}
+
+/// Runs one folder dialog on the calling (COM-initialised) thread.
+fn show_folder_dialog(owner: isize) -> Result<Option<String>, String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoTaskMemFree, CoUninitialize,
+    };
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, IShellItem, SIGDN_FILESYSPATH,
+    };
+    use windows::core::HSTRING;
+
+    // SAFETY: this thread is fresh, so it owns the initialisation; the matching `CoUninitialize`
+    // runs below on every return path that succeeded.
+    let initialised = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+
+    let result = (|| -> Result<Option<String>, String> {
+        // SAFETY: `FileOpenDialog` is a registered shell class and the interface is the documented
+        // one; the returned pointer is owned by the reference-counted `IFileOpenDialog`.
+        let dialog: IFileOpenDialog =
+            unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
+                .map_err(|error| format!("cannot create the folder dialog: {error}"))?;
+
+        // SAFETY: the dialog is a live COM object for the whole block.
+        let current = unsafe { dialog.GetOptions() }
+            .map_err(|error| format!("cannot read the folder dialog options: {error}"))?;
+        unsafe { dialog.SetOptions(folder_dialog_options(current)) }
+            .map_err(|error| format!("cannot configure the folder dialog: {error}"))?;
+        unsafe {
+            dialog.SetTitle(&HSTRING::from(
+                "Выберите папку zapret / Choose the zapret folder",
+            ))
+        }
+        .map_err(|error| format!("cannot title the folder dialog: {error}"))?;
+
+        let owner = (owner != 0).then_some(HWND(owner as *mut _));
+
+        // SAFETY: the owner, when present, is the live window this bridge belongs to.
+        if let Err(error) = unsafe { dialog.Show(owner) } {
+            // `Show` reports a plain cancel as `ERROR_CANCELLED`, not as a failure to report.
+            if error.code().0 == 0x8007_04C7u32 as i32 {
+                return Ok(None);
+            }
+
+            return Err(format!("the folder dialog failed: {error}"));
+        }
+
+        // SAFETY: a shown dialog that was not cancelled has a result item.
+        let item: IShellItem = unsafe { dialog.GetResult() }
+            .map_err(|error| format!("cannot read the chosen folder: {error}"))?;
+        // SAFETY: the item is alive and the flag asks for the filesystem path.
+        let name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }
+            .map_err(|error| format!("cannot name the chosen folder: {error}"))?;
+        // SAFETY: `GetDisplayName` hands back a NUL-terminated string this process owns.
+        let text = unsafe { name.to_string() }
+            .map_err(|error| format!("the chosen folder is not valid UTF-16: {error}"))?;
+
+        // SAFETY: the string came from COM's task allocator and is released exactly once here.
+        unsafe { CoTaskMemFree(Some(name.0 as *const _)) };
+
+        Ok(Some(text))
+    })();
+
+    if initialised {
+        // SAFETY: balances the successful `CoInitializeEx` above, on this same thread.
+        unsafe { CoUninitialize() };
+    }
+
+    result
+}
+
 /// A NUL-terminated UTF-16 copy of `text`.
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
@@ -2682,6 +3223,113 @@ mod tests {
     }
 
     #[test]
+    fn performance_get_answers_the_resolved_profile() {
+        let (_dir, context) = context();
+
+        let reply = dispatch(&context, &job("performance.get", Value::Null));
+
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload["profile"], json!("balanced"));
+        assert_eq!(reply.payload["wallpaperFps"], json!(30));
+        assert_eq!(reply.payload["animations"], json!(true));
+        assert_eq!(reply.payload["metricsMs"], json!(1_000));
+        assert_eq!(reply.payload["updateCheckHours"], json!(6));
+        assert_eq!(reply.payload["dockPollMs"], json!(100));
+    }
+
+    #[test]
+    fn performance_get_honours_overrides_and_clamps_them() {
+        let (_dir, context) = context();
+        let mut config = Config::default();
+        config.performance.profile = PerformanceProfile::Quality;
+        config.performance.wallpaper_fps = Some(0);
+        config.performance.animations = Some(false);
+        config.performance.metrics_ms = Some(99);
+        config.performance.update_check_hours = Some(1_000);
+        context.store.save(&config).expect("save");
+
+        let reply = dispatch(&context, &job("performance.get", Value::Null));
+
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload["profile"], json!("quality"));
+        assert_eq!(reply.payload["wallpaperFps"], json!(1));
+        assert_eq!(reply.payload["animations"], json!(false));
+        assert_eq!(reply.payload["metricsMs"], json!(100));
+        assert_eq!(reply.payload["updateCheckHours"], json!(168));
+        assert_eq!(reply.payload["dockPollMs"], json!(60));
+    }
+
+    #[test]
+    fn performance_set_saves_and_refreshes_the_shell_and_the_wallpaper() {
+        let (_dir, mut context) = context();
+        let (shell_pipe, shell) = stub("performance-shell", |request: Request| {
+            assert_eq!(request.method, "shell.reload");
+            Response::success(request.id, json!({ "ok": true }))
+        });
+        let (supervisor_pipe, supervisor) = stub("performance-wallpaper", |request: Request| {
+            assert_eq!(request.method, "app.restartChild");
+            assert_eq!(request.params.as_ref().unwrap()["name"], json!("wallpaper"));
+            Response::success(request.id, json!({ "name": "wallpaper", "running": true }))
+        });
+        context.shell_pipe = shell_pipe;
+        context.supervisor_pipe = supervisor_pipe;
+
+        let reply = dispatch(
+            &context,
+            &job("performance.set", json!({ "profile": "performance" })),
+        );
+
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload["profile"], json!("performance"));
+        assert_eq!(reply.payload["wallpaperFps"], json!(10));
+        assert_eq!(reply.payload["animations"], json!(false));
+        assert_eq!(reply.payload["dockPollMs"], json!(250));
+
+        let config = context.store.load_checked().expect("readable");
+        assert_eq!(config.performance.profile, PerformanceProfile::Performance);
+
+        shell.shutdown();
+        supervisor.shutdown();
+    }
+
+    #[test]
+    fn performance_set_refuses_an_unknown_profile_without_touching_the_file() {
+        let (_dir, context) = context();
+
+        let reply = dispatch(
+            &context,
+            &job("performance.set", json!({ "profile": "turbo" })),
+        );
+
+        assert!(!reply.ok);
+        assert!(reply.error.unwrap_or_default().contains("turbo"));
+        assert!(!context.store.path().exists(), "a refusal writes nothing");
+    }
+
+    #[test]
+    fn performance_set_still_succeeds_when_neither_live_process_answers() {
+        let (_dir, context) = context();
+
+        let reply = dispatch(
+            &context,
+            &job("performance.set", json!({ "profile": "quality" })),
+        );
+
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload["profile"], json!("quality"));
+        assert_eq!(reply.payload["wallpaperFps"], json!(60));
+        assert_eq!(
+            context
+                .store
+                .load_checked()
+                .expect("readable")
+                .performance
+                .profile,
+            PerformanceProfile::Quality
+        );
+    }
+
+    #[test]
     fn app_quit_asks_the_supervisor_to_stop() {
         let (_dir, mut context) = context();
         let (pipe, server) = stub("app-quit", |request: Request| {
@@ -2900,6 +3548,252 @@ mod tests {
         let reply = dispatch(&context, &job("wallpaper.pickFile", Value::Null));
         assert!(!reply.ok);
         assert!(reply.error.unwrap_or_default().contains("no dialog"));
+    }
+
+    #[test]
+    fn the_folder_picker_asks_for_folders_and_drops_the_file_only_flags() {
+        use windows::Win32::UI::Shell::{
+            FILEOPENDIALOGOPTIONS, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
+            FOS_PICKFOLDERS,
+        };
+
+        let options = folder_dialog_options(FILEOPENDIALOGOPTIONS(
+            FOS_FILEMUSTEXIST.0 | FOS_PATHMUSTEXIST.0,
+        ));
+
+        assert_ne!(options.0 & FOS_PICKFOLDERS.0, 0, "{options:?}");
+        assert_ne!(options.0 & FOS_FORCEFILESYSTEM.0, 0, "{options:?}");
+        assert_ne!(options.0 & FOS_PATHMUSTEXIST.0, 0, "{options:?}");
+        assert_eq!(
+            options.0 & FOS_FILEMUSTEXIST.0,
+            0,
+            "a folder is not a file, so the file-only flag must be gone"
+        );
+    }
+
+    /// Writes the two files every pack needs under `root` and returns that folder.
+    fn fake_pack(root: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(root.join("bin")).expect("bin");
+        std::fs::write(root.join("bin").join("winws.exe"), b"exe").expect("winws");
+        std::fs::write(root.join("bin").join("WinDivert64.sys"), b"sys").expect("driver");
+        root.to_path_buf()
+    }
+
+    #[test]
+    fn pack_candidates_put_the_named_folders_first_and_scan_downloads_one_level() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let downloads = dir.path().join("Downloads");
+        let named = fake_pack(&downloads.join("zapret-discord-youtube-main"));
+        let other = fake_pack(&downloads.join("a-renamed-pack"));
+        std::fs::create_dir_all(downloads.join("notes")).expect("notes");
+
+        let search = PackSearch {
+            fixed: Vec::new(),
+            downloads: Some(downloads.clone()),
+            local_app_data: Some(dir.path().join("Local")),
+        };
+
+        let candidates = search.candidates();
+
+        assert_eq!(candidates[0], named);
+        assert_eq!(
+            candidates[1],
+            dir.path().join("Local").join("ProjectNeb").join("zapret")
+        );
+        assert!(candidates.contains(&other), "{candidates:?}");
+        assert!(
+            !candidates
+                .iter()
+                .any(|path| path.ends_with("notes") || path.ends_with("Downloads")),
+            "only pack folders and the named candidates are listed: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn zapret_pick_pack_answers_a_cancel_without_calling_the_module() {
+        let (_dir, context) = context();
+
+        let reply = dispatch(&context, &job("zapret.pickPack", Value::Null));
+
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload, json!({ "cancelled": true }));
+    }
+
+    #[test]
+    fn zapret_pick_pack_imports_the_chosen_folder_and_returns_its_state() {
+        let (_dir, mut context) = context();
+        let (pipe, server) = stub("pick-pack", |request: Request| {
+            assert_eq!(request.method, "zapret.import");
+            assert_eq!(
+                request.params.as_ref().unwrap()["path"],
+                json!(r"C:\packs\zapret")
+            );
+            Response::success(
+                request.id,
+                json!({ "installed": true, "path": r"C:\data\zapret" }),
+            )
+        });
+        context.zapret_pipe = pipe;
+        context.folder_picker = |_| Ok(Some(r"C:\packs\zapret".to_owned()));
+
+        let reply = dispatch(&context, &job("zapret.pickPack", Value::Null));
+
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload["cancelled"], json!(false));
+        assert_eq!(reply.payload["path"], json!(r"C:\packs\zapret"));
+        assert_eq!(reply.payload["state"]["installed"], json!(true));
+        server.shutdown();
+    }
+
+    #[test]
+    fn zapret_detect_pack_imports_the_first_valid_candidate() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let downloads = dir.path().join("Downloads");
+        let pack = fake_pack(&downloads.join("zapret-discord-youtube-main"));
+        let expected = pack.display().to_string();
+
+        let (_root, mut context) = context();
+        context.pack_search = PackSearch {
+            fixed: vec![dir.path().join("missing")],
+            downloads: Some(downloads),
+            local_app_data: None,
+        };
+
+        let (pipe, server) = stub("detect-pack", move |request: Request| {
+            assert_eq!(request.method, "zapret.import");
+            assert_eq!(request.params.as_ref().unwrap()["path"], json!(expected));
+            Response::success(request.id, json!({ "installed": true, "strategies": 22 }))
+        });
+        context.zapret_pipe = pipe;
+
+        let reply = dispatch(&context, &job("zapret.detectPack", Value::Null));
+
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload["found"], json!(true));
+        assert_eq!(reply.payload["path"], json!(pack.display().to_string()));
+        assert_eq!(reply.payload["state"]["strategies"], json!(22));
+        server.shutdown();
+    }
+
+    #[test]
+    fn zapret_detect_pack_reports_nothing_found() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (_root, mut context) = context();
+        context.pack_search = PackSearch {
+            fixed: vec![dir.path().join("missing")],
+            downloads: Some(dir.path().join("Downloads")),
+            local_app_data: None,
+        };
+
+        let reply = dispatch(&context, &job("zapret.detectPack", Value::Null));
+
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload, json!({ "found": false }));
+    }
+
+    #[test]
+    fn discord_configure_saves_the_id_restarts_the_module_and_returns_its_state() {
+        let (_dir, mut context) = context();
+        let app_id = "123456789012345678";
+
+        let (supervisor, supervisor_server) = stub("configure-discord", |request: Request| {
+            assert_eq!(request.method, "app.restartChild");
+            assert_eq!(request.params.as_ref().unwrap()["name"], json!("discord"));
+            Response::success(request.id, json!({ "name": "discord", "running": true }))
+        });
+        context.supervisor_pipe = supervisor;
+
+        let (discord, discord_server) = stub("configure-discord-state", |request: Request| {
+            assert_eq!(request.method, "discord.getState");
+            Response::success(
+                request.id,
+                json!({
+                    "ok": true,
+                    "state": "disconnected",
+                    "configured": true,
+                    "enabled": true,
+                    "appId": "123456789012345678",
+                }),
+            )
+        });
+        context.discord_pipe = discord;
+
+        let reply = dispatch(
+            &context,
+            &job("discord.configure", json!({ "appId": app_id })),
+        );
+
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload["appId"], json!(app_id));
+        assert_eq!(reply.payload["state"], json!("disconnected"));
+
+        let saved = context.store.load_checked().expect("readable");
+        assert_eq!(saved.discord.app_id, app_id);
+        assert!(saved.discord.enabled, "a configured id turns the module on");
+
+        supervisor_server.shutdown();
+        discord_server.shutdown();
+    }
+
+    #[test]
+    fn discord_configure_refuses_ids_that_are_not_snowflakes() {
+        let (_dir, context) = context();
+
+        for bad in [
+            json!({}),
+            json!({ "appId": "" }),
+            json!({ "appId": "12345678901234567x" }),
+            json!({ "appId": "1234567890123456" }),
+            json!({ "appId": "123456789012345678901" }),
+        ] {
+            let reply = dispatch(&context, &job("discord.configure", bad.clone()));
+            assert!(!reply.ok, "{bad} must be refused");
+        }
+
+        assert!(
+            !context.store.path().exists(),
+            "a refused app id must not be written"
+        );
+    }
+
+    #[test]
+    fn windhawk_install_answers_the_documented_four_fields() {
+        let (_dir, mut context) = context();
+        let (pipe, server) = stub("windhawk-install", |request: Request| {
+            assert_eq!(request.method, "windhawk.install");
+            assert_eq!(
+                request.params.as_ref().unwrap()["id"],
+                json!("accent-color-sync")
+            );
+            Response::success(
+                request.id,
+                json!({
+                    "id": "accent-color-sync",
+                    "installed": true,
+                    "enabled": "unknown",
+                    "needsWindhawkUi": true,
+                    "sourcePath": r"C:\Windhawk\ModsSource\accent-color-sync.wh.cpp",
+                }),
+            )
+        });
+        context.windhawk_pipe = pipe;
+
+        let reply = dispatch(
+            &context,
+            &job("windhawk.install", json!({ "id": "accent-color-sync" })),
+        );
+
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.payload["installed"], json!(true));
+        assert_eq!(reply.payload["enabled"], json!("unknown"));
+        assert_eq!(reply.payload["needsWindhawkUi"], json!(true));
+        assert!(
+            reply.payload["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "{reply:?}"
+        );
+        server.shutdown();
     }
 
     #[test]

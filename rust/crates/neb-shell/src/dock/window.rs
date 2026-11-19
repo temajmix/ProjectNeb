@@ -45,7 +45,7 @@ use crate::theme::Theme;
 use crate::widgets::WideBuf;
 use crate::window::{self as bar_window, WindowError};
 
-use super::autohide::{self, Autohide, POLL_MS};
+use super::autohide::{self, Autohide};
 use super::fullscreen;
 use super::layout::{self, DockPlan, Metrics};
 use super::render::{DockRenderer, FrameFx};
@@ -148,6 +148,8 @@ pub struct DockSpec {
     pub tile_dip: i32,
     /// The user's motion preferences.
     pub animations: AnimationSettings,
+    /// How often the pointer and the fullscreen input are sampled, in milliseconds.
+    pub poll_ms: u32,
     /// Where the placement calls go; the shell itself, or a recorder in a test.
     pub host: Arc<dyn DockPlacement>,
 }
@@ -188,6 +190,8 @@ struct DockState {
     tile_dip: i32,
     /// The user's motion preferences.
     animations: AnimationSettings,
+    /// The pointer/fullscreen poll period this window was created with.
+    poll_ms: u32,
     tooltip: Option<Tooltip>,
     /// A pointer sample waiting for the next tick; [`probe_pointer`] writes this.
     pointer: Option<(i32, i32)>,
@@ -232,6 +236,7 @@ impl DockState {
             animating: false,
             tile_dip: spec.tile_dip,
             animations: spec.animations,
+            poll_ms: spec.poll_ms.max(1),
             tooltip: None,
             pointer: None,
             busy: false,
@@ -247,7 +252,7 @@ impl DockState {
         // not the strip hides itself: a game must be able to push the dock away either way.
         // SAFETY: `hwnd` is this window and the timer id is ours.
         unsafe {
-            SetTimer(Some(self.hwnd), TIMER_POLL, POLL_MS, None);
+            SetTimer(Some(self.hwnd), TIMER_POLL, self.poll_ms, None);
         }
 
         self.check_fullscreen();

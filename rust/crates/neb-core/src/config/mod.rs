@@ -1,6 +1,7 @@
 //! The persisted application configuration and its atomic store.
 
 mod model;
+mod performance;
 mod store;
 
 pub use model::{
@@ -12,6 +13,11 @@ pub use model::{
     ModuleStates, SCHEMA_VERSION, SceneKind, ShellSettings, ThemeName, ThemeSettings,
     WallpaperSettings, WindhawkSettings, WindowManagerSettings, WindowRule, WindowSettings,
     ZapretSettings, default_widgets,
+};
+pub use performance::{
+    DEFAULT_PROFILE, MAX_METRICS_MS, MAX_UPDATE_CHECK_HOURS, MAX_WALLPAPER_FPS, MIN_METRICS_MS,
+    MIN_UPDATE_CHECK_HOURS, MIN_WALLPAPER_FPS, PROFILE_ANIMATION_SPEED, Performance,
+    PerformanceProfile, PerformanceSettings,
 };
 pub use store::{ConfigError, ConfigStore};
 

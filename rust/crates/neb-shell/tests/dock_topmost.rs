@@ -74,6 +74,7 @@ fn the_dock_asks_for_the_topmost_band_when_it_is_placed() {
         auto_hide: false,
         tile_dip: neb_shell::dock::layout::TILE_DIP,
         animations: Default::default(),
+        poll_ms: neb_shell::dock::autohide::POLL_MS,
         host: std::sync::Arc::clone(&recorder) as std::sync::Arc<dyn DockPlacement>,
     })
     .expect("the dock must be created");

@@ -90,6 +90,8 @@ pub struct Options {
     pub pipe: String,
     /// Instance mutex name; [`INSTANCE_MUTEX`] unless a test wants its own.
     pub instance: String,
+    /// Config file to read the child switches from; the real one unless a test provides its own.
+    pub config: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -103,6 +105,7 @@ impl Default for Options {
             updates: true,
             pipe: String::new(),
             instance: String::new(),
+            config: None,
         }
     }
 }
@@ -1038,7 +1041,11 @@ fn specs(options: &Options) -> Vec<ChildSpec> {
         return vec![ChildSpec::command(exe.clone(), args.clone())];
     }
 
-    let enabled = Enabled::from_file(&neb_core::paths::config_file());
+    let config_path = options
+        .config
+        .clone()
+        .unwrap_or_else(neb_core::paths::config_file);
+    let enabled = Enabled::from_file(&config_path);
 
     let shell = options.shell.clone().unwrap_or_else(|| sibling(SHELL_EXE));
     let wallpaper = options
@@ -1351,7 +1358,15 @@ mod tests {
 
     #[test]
     fn the_default_children_are_the_shell_next_to_this_binary_and_the_wallpaper() {
-        let specs = specs(&Options::default());
+        // A hermetic config: the machine's real one may have modules enabled by now.
+        let dir = std::env::temp_dir().join(format!("neb-specs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.json");
+        std::fs::write(&config, "{}").unwrap();
+        let specs = specs(&Options {
+            config: Some(config),
+            ..Options::default()
+        });
 
         assert_eq!(specs.len(), 6);
         assert_eq!(specs[0].name, "shell");

@@ -53,6 +53,7 @@ fn a_hidden_dock_reveals_at_the_bottom_and_hides_again_when_the_pointer_leaves()
         auto_hide: true,
         tile_dip: neb_shell::dock::layout::TILE_DIP,
         animations: Default::default(),
+        poll_ms: neb_shell::dock::autohide::POLL_MS,
         host: neb_shell::dock::window::windows(),
     })
     .expect("the dock must be created");
@@ -109,6 +110,7 @@ fn an_auto_hiding_dock_that_is_not_auto_hiding_stays_put() {
         auto_hide: false,
         tile_dip: neb_shell::dock::layout::TILE_DIP,
         animations: Default::default(),
+        poll_ms: neb_shell::dock::autohide::POLL_MS,
         host: neb_shell::dock::window::windows(),
     })
     .expect("the dock must be created");
