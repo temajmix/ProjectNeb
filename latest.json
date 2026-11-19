@@ -1,17 +1,17 @@
 {
-  "version": "0.2.0",
+  "version": "0.3.0",
   "channel": "beta",
   "released": "2026-11-19",
-  "notes": "Единый ProjectNeb.exe: панель, док, лаунчер, живые обои, оконный менеджер, обход блокировок (22 стратегии), Discord RP, темы и режим замены Windows. Живые метрики и все действия из трея - в главном окне.",
+  "notes": "Windhawk: каталог 946 модов, установка и удаление из приложения, экран Расширения. Единый установщик со всеми модулями, живой мост приложения, фикс курсора панели и дока. В репозитории появился бэкенд Pro (не развёрнут).",
   "changelogUrl": "https://github.com/temajmix/ProjectNeb/blob/main/CHANGELOG.md",
   "assets": {
     "portable": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.2.0/ProjectNeb-0.2.0-beta-portable.zip",
-      "sha256": "6EC1BD76CE0FC68CDDFE9D484A2795C42B2CCC83E50F9A4159AA048DBC3A59BF"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.3.0/ProjectNeb-0.3.0-beta-portable.zip",
+      "sha256": "ED62C47C1CD62D53A31933EEE00F74765D49DE1B26F26C72F592F967E55ABAD9"
     },
     "setup": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.2.0/ProjectNeb-0.2.0-beta-setup.exe",
-      "sha256": "4A992D5B4611A19F3DAA0D71F2DA0F159349040A804A67A6A7A3CC32EF915386"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.3.0/ProjectNeb-0.3.0-beta-setup.exe",
+      "sha256": "B5801D1D926122040CDFE4E358A75B8128ABA52496966AF3839E498EB35636F1"
     }
   }
 }
