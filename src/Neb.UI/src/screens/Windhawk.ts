@@ -16,6 +16,7 @@ import {
 import { icon } from "../components/icons";
 import { confirmDialog } from "../components/Modal";
 import { showToast } from "../components/toast";
+import { countLabel, nouns } from "../i18n/plural";
 
 /**
  * «Расширения (Windhawk)» — the catalog of Windhawk mods and the installed set.
@@ -980,12 +981,19 @@ export function createWindhawkScreen(ctx: AppContext): Screen {
 
     const spacer = el("div", "windhawk-list__spacer");
     spacer.style.height = `${entries.length * RowHeight}px`;
+    spacer.setAttribute("role", "presentation");
 
     const layer = el("div", "windhawk-list__layer");
+    layer.setAttribute("role", "presentation");
     viewport.append(spacer, layer);
 
     let frame = 0;
     const paint = (): void => {
+      const focusKey =
+        document.activeElement instanceof HTMLElement &&
+        document.activeElement.classList.contains("windhawk-list__row")
+          ? document.activeElement.dataset.focus
+          : undefined;
       const height = viewport.clientHeight || 360;
       const top = viewport.scrollTop;
       const first = Math.max(0, Math.floor(top / RowHeight) - 2);
@@ -1008,6 +1016,13 @@ export function createWindhawkScreen(ctx: AppContext): Screen {
 
       layer.replaceChildren(...rows);
       layer.style.transform = `translateY(${first * RowHeight}px)`;
+
+      if (focusKey) {
+        const restored = layer.querySelector<HTMLElement>(
+          `[data-focus="${CSS.escape(focusKey)}"]`,
+        );
+        restored?.focus({ preventScroll: true });
+      }
     };
 
     viewport.addEventListener(
@@ -1022,6 +1037,35 @@ export function createWindhawkScreen(ctx: AppContext): Screen {
 
     viewport.scrollTop = catalogTop;
     paint();
+
+    viewport.addEventListener("keydown", (event) => {
+      if (
+        event.key !== "ArrowDown" &&
+        event.key !== "ArrowUp" &&
+        event.key !== "Home" &&
+        event.key !== "End"
+      ) {
+        return;
+      }
+
+      const rows = Array.from(layer.querySelectorAll<HTMLElement>(".windhawk-list__row"));
+      if (rows.length === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      const index = rows.indexOf(document.activeElement as HTMLElement);
+      const target =
+        event.key === "Home"
+          ? rows[0]
+          : event.key === "End"
+            ? rows[rows.length - 1]
+            : event.key === "ArrowDown"
+              ? rows[index < 0 ? 0 : Math.min(rows.length - 1, index + 1)]
+              : rows[index <= 0 ? 0 : index - 1];
+      target?.focus({ preventScroll: false });
+      target?.scrollIntoView({ block: "nearest" });
+    });
 
     return viewport;
   };
@@ -1048,6 +1092,8 @@ export function createWindhawkScreen(ctx: AppContext): Screen {
         : l("chipInstalled");
 
     const banner = el("div", "windhawk__result");
+    banner.setAttribute("role", "status");
+    banner.setAttribute("aria-live", "polite");
     const head = el("div", "windhawk__resultHead");
     head.append(
       pill(label, tone),
@@ -1087,8 +1133,12 @@ export function createWindhawkScreen(ctx: AppContext): Screen {
   const renderCatalog = (): HTMLElement => {
     const count =
       query.trim().length > 0
-        ? t("windhawk.catalog.found", { count: total })
-        : t("windhawk.catalog.total", { total });
+        ? t("windhawk.catalog.found", {
+            count: countLabel(ctx.i18n.language, total, nouns.mods.ru, nouns.mods.en),
+          })
+        : t("windhawk.catalog.total", {
+            total: countLabel(ctx.i18n.language, total, nouns.mods.ru, nouns.mods.en),
+          });
     const actions: HTMLElement[] = [pill(count, "neutral")];
     const refresh = button({
       label: t("windhawk.refresh"),
@@ -1202,7 +1252,10 @@ export function createWindhawkScreen(ctx: AppContext): Screen {
 
   const renderInstalled = (): HTMLElement => {
     const actions: HTMLElement[] = [
-      pill(t("windhawk.installed.count", { count: mods.length }), "neutral"),
+      pill(
+        countLabel(ctx.i18n.language, mods.length, nouns.mods.ru, nouns.mods.en),
+        "neutral",
+      ),
     ];
 
     const refresh = button({
@@ -1372,6 +1425,18 @@ export function createWindhawkScreen(ctx: AppContext): Screen {
       item.textContent = t(id === "catalog" ? "windhawk.tab.catalog" : "windhawk.tab.installed");
       item.addEventListener("click", () => setTab(id));
       item.addEventListener("keydown", (event) => {
+        if (event.key === "Home") {
+          event.preventDefault();
+          setTab("catalog");
+          return;
+        }
+
+        if (event.key === "End") {
+          event.preventDefault();
+          setTab("installed");
+          return;
+        }
+
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
           return;
         }

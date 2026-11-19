@@ -69,6 +69,11 @@ let configLoaded = false;
 function adoptConfig(raw: unknown): void {
   config = normalizeConfig(raw);
   configLoaded = true;
+  applyMotion();
+}
+
+function applyMotion(): void {
+  document.documentElement.classList.toggle("no-motion", !config.animations.enabled);
 }
 
 async function saveConfig(path: string, value: unknown): Promise<boolean> {
@@ -362,6 +367,9 @@ async function changeLanguage(language: Language): Promise<void> {
   if (!saved) {
     i18n.setLanguage(previous);
   }
+
+  // Re-rendering the sidebar replaces the language chip; put the keyboard back on the chosen one.
+  document.querySelector<HTMLElement>(`#lang-${saved ? language : previous}`)?.focus({ preventScroll: true });
 }
 
 const sidebar = createSidebar(i18n, {
@@ -373,6 +381,7 @@ const sidebar = createSidebar(i18n, {
 
 const content = document.createElement("main");
 content.className = "content";
+content.id = "main-content";
 
 for (const id of screenOrder) {
   screens[id].el.hidden = id !== "overview";
@@ -634,6 +643,7 @@ document.body.append(palette.el, shortcuts.el, onboarding.el);
 
 function renderAll(): void {
   document.documentElement.lang = i18n.language;
+  applyMotion();
   document.title = `${i18n.t("app.name")} — ${i18n.t(current ? screenMeta[current].label : "nav.overview")}`;
 
   titleBar.render();

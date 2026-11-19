@@ -2,6 +2,8 @@ import type { I18n, MessageKey } from "../i18n";
 import { icon } from "./icons";
 import { createRestartBadge } from "./RestartBadge";
 import { showToast } from "./toast";
+import { attachRadioKeys } from "./roving";
+import { countLabel, plural, nouns } from "../i18n/plural";
 
 /** The wallpaper settings as the host sends them (`WallpaperSettings` over the bridge, camelCase). */
 export interface WallpaperSettings {
@@ -87,6 +89,7 @@ export function createWallpapersSection(i18n: I18n, invoke: Invoke): WallpapersS
   let sessionBaseline: WallpaperSettings | null = null;
   /** True once a saved scene value differs from the process that is drawing the desktop. */
   let pendingRestart = false;
+  let lastFocusId = "";
 
   type Attempt<T> =
     | { ok: true; data: T }
@@ -104,6 +107,11 @@ export function createWallpapersSection(i18n: I18n, invoke: Invoke): WallpapersS
   };
 
   const render = (): void => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && el.contains(active) && active.id.length > 0) {
+      lastFocusId = active.id;
+    }
+
     if (loading) {
       el.replaceChildren(message(i18n.t("wallpapers.loading"), "settings__state"));
       return;
@@ -118,6 +126,13 @@ export function createWallpapersSection(i18n: I18n, invoke: Invoke): WallpapersS
 
     el.replaceChildren(createSceneCard(), createSideCard());
     el.classList.toggle("settings--busy", busy);
+
+    if (lastFocusId.length > 0) {
+      const node = el.querySelector<HTMLElement>(`#${CSS.escape(lastFocusId)}`);
+      if (node && !node.hasAttribute("disabled") && node.getClientRects().length > 0) {
+        node.focus({ preventScroll: true });
+      }
+    }
   };
 
   const createSceneCard = (): HTMLElement => {
@@ -222,6 +237,7 @@ export function createWallpapersSection(i18n: I18n, invoke: Invoke): WallpapersS
     for (const kind of kinds) {
       const choice = document.createElement("button");
       choice.type = "button";
+      choice.id = `wallpaper-kind-${kind.toLowerCase()}`;
       choice.className = `segmented__btn${settings?.kind === kind ? " segmented__btn--active" : ""}`;
       choice.dataset.kind = kind;
       choice.setAttribute("role", "radio");
@@ -238,6 +254,7 @@ export function createWallpapersSection(i18n: I18n, invoke: Invoke): WallpapersS
       group.append(choice);
     }
 
+    attachRadioKeys(group);
     row.append(text, group);
     return row;
   };
@@ -317,11 +334,18 @@ export function createWallpapersSection(i18n: I18n, invoke: Invoke): WallpapersS
     text.className = "settings__text";
     const name = document.createElement("span");
     name.className = "settings__name";
-    name.textContent = `${i18n.t("wallpapers.rotate.title")}, ${i18n.t("wallpapers.rotate.unit")}`;
+    const minutes = Number(settings?.rotateMinutes ?? 30);
+    name.textContent = i18n.t("wallpapers.rotate.title", {
+      count: minutes,
+      unit: plural(i18n.language, minutes, nouns.minutes.ru, nouns.minutes.en),
+    });
     const desc = document.createElement("span");
     desc.className = "settings__desc";
     desc.textContent = i18n.t("wallpapers.rotate.hint", {
-      count: count === 0 ? i18n.t("wallpapers.playlist.empty") : i18n.t("wallpapers.playlist.count", { count }),
+      count:
+        count === 0
+          ? i18n.t("wallpapers.playlist.empty")
+          : countLabel(i18n.language, count, nouns.files.ru, nouns.files.en),
     });
     text.append(name, desc);
 
@@ -337,7 +361,10 @@ export function createWallpapersSection(i18n: I18n, invoke: Invoke): WallpapersS
     input.step = "1";
     input.value = String(settings?.rotateMinutes ?? 30);
     input.disabled = busy;
-    input.setAttribute("aria-label", i18n.t("wallpapers.rotate.title"));
+    input.setAttribute("aria-label", name.textContent ?? i18n.t("wallpapers.rotate.title", {
+      count: minutes,
+      unit: plural(i18n.language, minutes, nouns.minutes.ru, nouns.minutes.en),
+    }));
     input.addEventListener("change", () => void patch({ rotateMinutes: Number(input.value) }));
 
     actions.append(input);
@@ -399,6 +426,8 @@ export function createWallpapersSection(i18n: I18n, invoke: Invoke): WallpapersS
     const status = document.createElement("span");
     status.className = `settings__status${running ? " settings__status--on" : ""}`;
     status.id = "wallpaper-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
     status.textContent = i18n.t(running ? "wallpapers.status.running" : "wallpapers.status.stopped");
     head.append(title, status);
 
@@ -421,6 +450,8 @@ export function createWallpapersSection(i18n: I18n, invoke: Invoke): WallpapersS
         ? `${i18n.t(kind)} · ${settings?.color ?? ""}`
         : `${i18n.t(kind)} · ${settings?.kind === "Web" && !settings.path ? "aurora" : fileName(settings?.path ?? "") || "—"}`;
     preview.append(caption);
+    preview.setAttribute("role", "img");
+    preview.setAttribute("aria-label", caption.textContent ?? i18n.t("wallpapers.preview.title"));
 
     const hint = document.createElement("p");
     hint.className = "settings__hint";

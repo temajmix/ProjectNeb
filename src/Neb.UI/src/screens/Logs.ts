@@ -1,6 +1,8 @@
 import type { AppContext, Screen } from "../context";
 import { button, el, emptyState, formatTime, panel, skeleton, switchControl } from "../components/controls";
 import { showToast } from "../components/toast";
+import { watchFocus } from "../components/focus";
+import { plural, nouns } from "../i18n/plural";
 
 const TailLimit = 200;
 const LevelPattern = /\b(ERROR|WARN|WARNING|INFO|DEBUG|TRACE)\b/;
@@ -58,6 +60,7 @@ export function createLogsScreen(ctx: AppContext): Screen {
   let logsPath = "%LocalAppData%\\ProjectNeb\\logs";
   let timer = 0;
   let inFlight = false;
+  const focus = watchFocus(root);
 
   const stopTimer = (): void => {
     window.clearInterval(timer);
@@ -144,7 +147,10 @@ export function createLogsScreen(ctx: AppContext): Screen {
 
     const aside = el("div", "screen__aside");
     if (lines) {
-      aside.append(el("span", "pill pill--neutral", ctx.i18n.t("logs.lines", { count: lines.length })));
+      const word = plural(ctx.i18n.language, lines.length, nouns.lines.ru, nouns.lines.en);
+      aside.append(
+        el("span", "pill pill--neutral", ctx.i18n.t("logs.lines", { count: lines.length, word })),
+      );
     }
 
     head.append(copy, aside);
@@ -185,6 +191,7 @@ export function createLogsScreen(ctx: AppContext): Screen {
       switchControl({
         checked: auto,
         label: ctx.i18n.t("logs.auto"),
+        id: "logs-auto",
         onToggle: toggleAuto,
       }),
     );
@@ -251,9 +258,14 @@ export function createLogsScreen(ctx: AppContext): Screen {
     );
 
     if (updatedAt) {
-      meta.append(
-        el("span", "logs__updated", ctx.i18n.t("logs.updated", { time: formatTime(updatedAt, ctx.i18n.language) })),
+      const updated = el(
+        "span",
+        "logs__updated",
+        ctx.i18n.t("logs.updated", { time: formatTime(updatedAt, ctx.i18n.language) }),
       );
+      updated.setAttribute("role", "status");
+      updated.setAttribute("aria-live", "polite");
+      meta.append(updated);
     }
 
     return meta;
@@ -266,6 +278,7 @@ export function createLogsScreen(ctx: AppContext): Screen {
 
     card.body.append(renderToolbar(), renderMeta(), renderBody());
     root.replaceChildren(renderHeader(), card.el);
+    focus.restore();
 
     const view = root.querySelector<HTMLElement>("#logs-view");
     if (view) {

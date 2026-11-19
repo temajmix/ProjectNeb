@@ -115,6 +115,7 @@ export function createSidebar(i18n: I18n, options: SidebarOptions): Sidebar {
     for (const group of groups) {
       const label = document.createElement("span");
       label.className = "nav__group";
+      label.setAttribute("aria-hidden", "true");
       label.textContent = i18n.t(group === "product" ? "nav.group.product" : "nav.group.service");
       nav.append(label);
 
@@ -132,6 +133,8 @@ export function createSidebar(i18n: I18n, options: SidebarOptions): Sidebar {
         item.className = "nav-item";
         item.dataset.section = id;
         item.title = shortcut ? `${i18n.t(section.label)} · ${shortcut}` : i18n.t(section.label);
+        // The label collapses into the icon rail below 960 px, so the button carries its name.
+        item.setAttribute("aria-label", i18n.t(section.label));
         if (chord) {
           item.setAttribute("aria-keyshortcuts", `Control+${chord}`);
         }
@@ -177,6 +180,7 @@ export function createSidebar(i18n: I18n, options: SidebarOptions): Sidebar {
       choice.type = "button";
       choice.className = "lang-switch__btn";
       choice.dataset.lang = language;
+      choice.id = `lang-${language}`;
       choice.textContent = language.toUpperCase();
       choice.setAttribute("aria-pressed", String(i18n.language === language));
       choice.addEventListener("click", () => options.onLanguage(language));

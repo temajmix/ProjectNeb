@@ -1,6 +1,7 @@
 import type { MessageKey } from "../i18n";
 import type { I18n } from "../i18n";
 import { icon, type IconName } from "./icons";
+import { attachRadioKeys } from "./roving";
 
 /** Small DOM helpers shared by every screen. */
 
@@ -147,28 +148,53 @@ export function segmented<T extends string>(options: {
   value: T;
   items: readonly SegmentedOption<T>[];
   label: string;
+  /** Optional element id; each radio gets `${id}-${value}` so focus can be restored after a render. */
+  id?: string;
   disabled?: boolean;
   onChange(value: T): void;
 }): HTMLElement {
   const group = el("div", "segmented");
   group.setAttribute("role", "radiogroup");
   group.setAttribute("aria-label", options.label);
+  if (options.id) {
+    group.id = options.id;
+  }
+
+  let current = options.value;
+  const buttons: HTMLButtonElement[] = [];
 
   for (const item of options.items) {
     const choice = el("button", "segmented__btn", item.label);
     choice.type = "button";
     choice.setAttribute("role", "radio");
-    choice.setAttribute("aria-checked", String(item.value === options.value));
-    choice.classList.toggle("segmented__btn--active", item.value === options.value);
+    choice.setAttribute("aria-checked", String(item.value === current));
+    choice.classList.toggle("segmented__btn--active", item.value === current);
     choice.disabled = options.disabled === true;
+    if (options.id) {
+      choice.id = `${options.id}-${item.value}`;
+    }
+
     choice.addEventListener("click", () => {
-      if (item.value !== options.value) {
-        options.onChange(item.value);
+      if (item.value === current) {
+        return;
       }
+
+      current = item.value;
+      for (const button of buttons) {
+        const checked = button.dataset.value === item.value;
+        button.classList.toggle("segmented__btn--active", checked);
+        button.setAttribute("aria-checked", String(checked));
+      }
+
+      options.onChange(item.value);
     });
+
+    choice.dataset.value = item.value;
+    buttons.push(choice);
     group.append(choice);
   }
 
+  attachRadioKeys(group);
   return group;
 }
 

@@ -76,7 +76,7 @@ export function createTitleBar(i18n: I18n, options: TitleBarOptions): TitleBar {
     const actions = document.createElement("div");
     actions.className = "window-actions";
     actions.append(
-      button(i18n.t("titlebar.minimize"), "minimize", options.onMinimize),
+      button(i18n.t("titlebar.minimize"), "minimize", options.onMinimize, "", "win-minimize"),
       button(
         i18n.t(maximized ? "titlebar.restore" : "titlebar.maximize"),
         maximized ? "restore" : "maximize",
@@ -84,7 +84,7 @@ export function createTitleBar(i18n: I18n, options: TitleBarOptions): TitleBar {
         "",
         "win-maximize",
       ),
-      button(i18n.t("titlebar.close"), "close", options.onClose, "win-btn--close"),
+      button(i18n.t("titlebar.close"), "close", options.onClose, "win-btn--close", "win-close"),
     );
 
     const focused = document.activeElement instanceof HTMLElement ? document.activeElement.id : "";

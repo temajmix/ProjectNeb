@@ -90,6 +90,7 @@ export function createPalette(i18n: I18n, options: PaletteOptions): Palette {
   let entries: PaletteEntry[] = [];
   let shown: PaletteEntry[] = [];
   let selected = 0;
+  let trigger: HTMLElement | null = null;
 
   const label = (entry: PaletteEntry): string => entry.label;
 
@@ -227,6 +228,10 @@ export function createPalette(i18n: I18n, options: PaletteOptions): Palette {
     });
 
     input.setAttribute("aria-activedescendant", shown.length > 0 ? `palette-item-${selected}` : "");
+    if (shown.length === 0) {
+      input.removeAttribute("aria-activedescendant");
+    }
+
     scrollSelected();
   };
 
@@ -291,6 +296,7 @@ export function createPalette(i18n: I18n, options: PaletteOptions): Palette {
       return;
     }
 
+    trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     render();
     dialog.showModal();
     input.focus();
@@ -302,9 +308,18 @@ export function createPalette(i18n: I18n, options: PaletteOptions): Palette {
     }
   };
 
+  dialog.addEventListener("close", () => {
+    if (trigger && trigger.isConnected) {
+      trigger.focus({ preventScroll: true });
+    }
+
+    trigger = null;
+  });
+
   const render = (): void => {
     dialog.setAttribute("aria-label", i18n.t("palette.title"));
     input.placeholder = i18n.t("palette.placeholder");
+    input.setAttribute("aria-label", i18n.t("palette.placeholder"));
     hint.textContent = i18n.t("palette.hint");
     empty.textContent = i18n.t("palette.empty");
     entries = options.entries();

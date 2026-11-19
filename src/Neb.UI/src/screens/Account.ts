@@ -4,6 +4,7 @@ import type { MessageKey } from "../i18n";
 import { button, el, panel, pill, setBusy } from "../components/controls";
 import { icon } from "../components/icons";
 import { showToast } from "../components/toast";
+import { watchFocus } from "../components/focus";
 
 /**
  * «Аккаунт» — the ProjectNeb Pro account.
@@ -75,6 +76,7 @@ export function createAccountScreen(ctx: AppContext): Screen {
   let failed = false;
   let state: AccountState = emptyState();
   let busy: Busy = null;
+  const focus = watchFocus(root);
 
   const formatUntil = (iso: string | null): string | null => {
     if (!iso) {
@@ -388,6 +390,7 @@ export function createAccountScreen(ctx: AppContext): Screen {
     const grid = el("div", "account__grid");
     grid.append(renderPlan(), renderPro());
     root.replaceChildren(renderHeader(), grid);
+    focus.restore();
   };
 
   render();

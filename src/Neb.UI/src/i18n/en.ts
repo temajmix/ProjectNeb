@@ -364,7 +364,7 @@ export const en: Messages = {
   "wallpapers.color.title": "Background colour",
   "wallpapers.color.hint":
     "Shown instead of the scene, and behind it when a picture is not the full size.",
-  "wallpapers.rotate.title": "Rotate every",
+  "wallpapers.rotate.title": "Every {count} {unit}",
   "wallpapers.rotate.unit": "min",
   "wallpapers.rotate.hint": "Playlist: {count}. “Choose” adds the picked file to it.",
   "wallpapers.playlist.empty": "empty",
@@ -728,7 +728,7 @@ export const en: Messages = {
   "logs.emptyText": "Start the shell and entries will appear here.",
   "logs.errorTitle": "The journal could not be read",
   "logs.errorText": "Make sure ProjectNeb is running and try again.",
-  "logs.lines": "Last {count} lines",
+  "logs.lines": "Last {count} {word}",
   "logs.updated": "Updated at {time}",
   "logs.loading": "Reading the journal…",
   "logs.openFailed": "The log folder could not be opened",

@@ -57,6 +57,7 @@ export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
 
   return new Promise<boolean>((resolve) => {
     let answered = false;
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const finish = (value: boolean): void => {
       if (answered) {
         return;
@@ -81,6 +82,11 @@ export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
     dialog.addEventListener("close", () => {
       finish(dialog.returnValue === "confirm");
       dialog.remove();
+      // `showModal` normally restores the trigger, but the node may already be gone by the time
+      // the async caller re-renders; put the keyboard back explicitly while it is still there.
+      if (trigger && trigger.isConnected) {
+        trigger.focus({ preventScroll: true });
+      }
     });
 
     document.body.append(dialog);

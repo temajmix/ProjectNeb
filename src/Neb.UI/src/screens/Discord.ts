@@ -15,6 +15,8 @@ import {
 import { confirmDialog } from "../components/Modal";
 import { attachRovingKeys } from "../components/roving";
 import { showToast } from "../components/toast";
+import { watchFocus } from "../components/focus";
+import { countLabel, nouns } from "../i18n/plural";
 
 /**
  * «Discord RP» — Rich Presence.
@@ -401,6 +403,7 @@ export function createDiscordScreen(ctx: AppContext): Screen {
 
   let dirtyChip: HTMLElement | null = null;
   let saveButton: HTMLButtonElement | null = null;
+  const focus = watchFocus(root);
 
   const presets = (): Preset[] => state?.presets ?? [];
 
@@ -870,8 +873,10 @@ export function createDiscordScreen(ctx: AppContext): Screen {
     input.placeholder = t("discord.appId.placeholder");
     input.value = appIdInput;
     input.disabled = busy !== null;
+    input.setAttribute("aria-describedby", "discord-app-id-error");
     if (appIdError) {
       input.setAttribute("aria-invalid", "true");
+      input.setAttribute("aria-errormessage", "discord-app-id-error");
     }
 
     input.addEventListener("input", () => {
@@ -879,6 +884,7 @@ export function createDiscordScreen(ctx: AppContext): Screen {
       if (appIdError && validAppId(input.value)) {
         appIdError = false;
         input.removeAttribute("aria-invalid");
+        input.removeAttribute("aria-errormessage");
         card.el.querySelector<HTMLElement>(".field__error")?.setAttribute("hidden", "");
       }
 
@@ -902,6 +908,8 @@ export function createDiscordScreen(ctx: AppContext): Screen {
     });
 
     const error = el("span", "field__error", t("discord.appId.invalid"));
+    error.id = "discord-app-id-error";
+    error.setAttribute("role", "alert");
     error.hidden = !appIdError;
 
     card.body.append(
@@ -1019,15 +1027,18 @@ export function createDiscordScreen(ctx: AppContext): Screen {
     }
 
     const list = el("div", "preset-list");
+    list.setAttribute("role", "list");
 
     for (const preset of presets()) {
       const active = preset.id === state?.activePresetId;
       const editing = preset.id === draftId;
       const row = el("div", `preset-row${active ? " preset-row--active" : ""}${editing ? " preset-row--editing" : ""}`);
+      row.setAttribute("role", "listitem");
 
       const open = el("button", "preset-row__open");
       open.type = "button";
       open.dataset.rovingItem = "";
+      open.dataset.focus = `preset-${preset.id}`;
       open.dataset.preset = preset.id;
       open.setAttribute("aria-pressed", String(editing));
 
@@ -1060,6 +1071,7 @@ export function createDiscordScreen(ctx: AppContext): Screen {
           icon: "check",
           onClick: () => void activate(preset),
         });
+        makeActive.dataset.focus = `activate-preset-${preset.id}`;
         makeActive.disabled = busy !== null;
         row.append(makeActive);
       }
@@ -1069,7 +1081,13 @@ export function createDiscordScreen(ctx: AppContext): Screen {
 
     attachRovingKeys(list);
     card.body.append(list);
-    card.body.append(el("p", "panel__note", t("discord.presets.count", { count: presets().length })));
+    card.body.append(
+      el(
+        "p",
+        "panel__note",
+        countLabel(ctx.i18n.language, presets().length, nouns.presets.ru, nouns.presets.en),
+      ),
+    );
     return card.el;
   };
 
@@ -1161,7 +1179,15 @@ export function createDiscordScreen(ctx: AppContext): Screen {
 
       const error = buttonErrors[index];
       if (error) {
-        slot.append(el("span", "field__error", t(error)));
+        const message = el("span", "field__error", t(error));
+        message.id = `discord-button-${index}-error`;
+        message.setAttribute("role", "alert");
+        slot.append(message);
+        for (const control of fields.querySelectorAll<HTMLInputElement>("input")) {
+          control.setAttribute("aria-describedby", message.id);
+          control.setAttribute("aria-errormessage", message.id);
+          control.setAttribute("aria-invalid", "true");
+        }
       }
 
       block.append(slot);
@@ -1279,6 +1305,7 @@ export function createDiscordScreen(ctx: AppContext): Screen {
       switchControl({
         checked: draft.startTimestamp,
         label: t("discord.editor.timestamp"),
+        id: "discord-timestamp",
         disabled: busy !== null,
         onToggle: (next) => {
           draft.startTimestamp = next;
@@ -1315,7 +1342,12 @@ export function createDiscordScreen(ctx: AppContext): Screen {
       title: t("discord.rules.title"),
       hint: t("discord.rules.hint"),
       icon: "settings",
-      actions: [pill(t("discord.rules.count", { count }), "neutral")],
+      actions: [
+        pill(
+          countLabel(ctx.i18n.language, count, nouns.rules.ru, nouns.rules.en),
+          "neutral",
+        ),
+      ],
       className: "discord__rules",
     });
 
@@ -1366,6 +1398,9 @@ export function createDiscordScreen(ctx: AppContext): Screen {
       newRule = { ...newRule, pattern: pattern.value };
       if (ruleError) {
         ruleError = null;
+        pattern.removeAttribute("aria-invalid");
+        pattern.removeAttribute("aria-describedby");
+        pattern.removeAttribute("aria-errormessage");
         const message = root.querySelector<HTMLElement>("#discord-rule-error");
         if (message) {
           message.hidden = true;
@@ -1434,7 +1469,14 @@ export function createDiscordScreen(ctx: AppContext): Screen {
 
     const error = el("p", "field__error", ruleError ? t(ruleError) : "");
     error.id = "discord-rule-error";
+    error.setAttribute("role", "alert");
     error.hidden = ruleError === null;
+    if (ruleError) {
+      pattern.setAttribute("aria-invalid", "true");
+      pattern.setAttribute("aria-describedby", error.id);
+      pattern.setAttribute("aria-errormessage", error.id);
+    }
+
     card.body.append(error);
 
     if (presets().length === 0) {
@@ -1447,8 +1489,10 @@ export function createDiscordScreen(ctx: AppContext): Screen {
     }
 
     const list = el("div", "rule-list");
+    list.setAttribute("role", "list");
     for (const rule of rules) {
       const row = el("div", "rule-row");
+      row.setAttribute("role", "listitem");
       const copy = el("span", "rule-row__copy");
       copy.append(
         el(
@@ -1469,6 +1513,7 @@ export function createDiscordScreen(ctx: AppContext): Screen {
         "icon-btn--danger",
       );
       remove.dataset.rovingItem = "";
+      remove.dataset.focus = `rule-${rule.id}`;
       remove.disabled = busy !== null;
 
       row.append(copy, remove);
@@ -1527,6 +1572,7 @@ export function createDiscordScreen(ctx: AppContext): Screen {
     grid.append(side, renderEditor());
 
     root.replaceChildren(renderHeader(), grid, renderRules());
+    focus.restore();
   };
 
   const activateScreen = async (): Promise<void> => {

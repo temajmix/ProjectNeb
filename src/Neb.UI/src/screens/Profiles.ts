@@ -9,6 +9,8 @@ import {
 import { icon } from "../components/icons";
 import { confirmDialog } from "../components/Modal";
 import { showToast } from "../components/toast";
+import { watchFocus } from "../components/focus";
+import { countLabel, nouns } from "../i18n/plural";
 
 /**
  * The Profiles screen owns its copy until `i18n/*` catches up: that module belongs to another
@@ -202,6 +204,7 @@ export function createProfilesScreen(ctx: AppContext): Screen {
   let nameError: ProfileCopyKey | null = null;
   let loading = false;
   let busy: { kind: "save" } | { kind: "profile"; id: string } | null = null;
+  const focus = watchFocus(root);
 
   const load = async (): Promise<void> => {
     loading = true;
@@ -436,6 +439,7 @@ export function createProfilesScreen(ctx: AppContext): Screen {
   const renderRow = (profile: ProfileEntry): HTMLElement => {
     const row = el("article", "profile-row");
     row.dataset.profile = profile.id;
+    row.setAttribute("role", "listitem");
 
     const glyph = el("span", "profile-row__glyph");
     glyph.innerHTML = icon("profiles", 18);
@@ -458,6 +462,7 @@ export function createProfilesScreen(ctx: AppContext): Screen {
     });
     apply.disabled = busy !== null;
     apply.dataset.action = "apply-profile";
+    apply.dataset.focus = `apply-profile-${profile.id}`;
 
     const remove = button({
       label: t("delete"),
@@ -468,6 +473,7 @@ export function createProfilesScreen(ctx: AppContext): Screen {
     });
     remove.disabled = busy !== null;
     remove.dataset.action = "delete-profile";
+    remove.dataset.focus = `delete-profile-${profile.id}`;
     remove.classList.add("profile-row__delete");
 
     actions.append(apply, remove);
@@ -480,11 +486,19 @@ export function createProfilesScreen(ctx: AppContext): Screen {
       title: t("listTitle"),
       hint: t("listHint"),
       icon: "profiles",
+      actions: [
+        el(
+          "span",
+          "pill pill--neutral",
+          countLabel(ctx.i18n.language, profiles.length, nouns.profiles.ru, nouns.profiles.en),
+        ),
+      ],
       className: "profiles-screen__list",
     });
 
     if (loading) {
       const wrap = el("div", "profile-list");
+      wrap.setAttribute("role", "list");
       wrap.append(skeletonPanel(2), skeletonPanel(2));
       card.body.append(wrap);
       return card.el;
@@ -510,6 +524,7 @@ export function createProfilesScreen(ctx: AppContext): Screen {
     }
 
     const list = el("div", "profile-list");
+    list.setAttribute("role", "list");
     for (const profile of profiles) {
       list.append(renderRow(profile));
     }
@@ -542,6 +557,7 @@ export function createProfilesScreen(ctx: AppContext): Screen {
     input.setAttribute("aria-invalid", String(nameError !== null));
     if (nameError) {
       input.setAttribute("aria-describedby", "profile-name-error");
+      input.setAttribute("aria-errormessage", "profile-name-error");
     }
 
     input.addEventListener("input", () => {
@@ -550,6 +566,7 @@ export function createProfilesScreen(ctx: AppContext): Screen {
         nameError = null;
         input.removeAttribute("aria-invalid");
         input.removeAttribute("aria-describedby");
+        input.removeAttribute("aria-errormessage");
         const error = root.querySelector<HTMLElement>("#profile-name-error");
         if (error) {
           error.hidden = true;
@@ -568,6 +585,7 @@ export function createProfilesScreen(ctx: AppContext): Screen {
 
     const error = el("span", "field__error", nameError ? t(nameError) : "");
     error.id = "profile-name-error";
+    error.setAttribute("role", "alert");
     error.hidden = nameError === null;
     field.append(error);
 
@@ -598,6 +616,7 @@ export function createProfilesScreen(ctx: AppContext): Screen {
     const grid = el("div", "profiles-screen__grid");
     grid.append(renderList(), renderForm());
     root.replaceChildren(renderHeader(), grid);
+    focus.restore();
   };
 
   const activate = async (): Promise<void> => {

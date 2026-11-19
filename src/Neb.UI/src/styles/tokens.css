@@ -20,9 +20,10 @@
   --lift: translateY(-1px);
   --text: #f6f4ff;
   --text-dim: #b7b3c9;
-  --text-mute: #7e7a92;
+  /* Muted copy still has to clear 4.5:1 on the lightest glass pane, not only on the window base. */
+  --text-mute: #948fa8;
   --accent: #a78bfa;
-  --accent-2: #7c5cff;
+  --accent-2: #8f6bff;
   --green: #3ddc97;
   --warn: #f0b45f;
   --danger: #ff6b6b;

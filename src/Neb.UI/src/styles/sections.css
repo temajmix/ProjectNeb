@@ -58,7 +58,7 @@
 }
 
 .segmented__btn--active {
-  background: linear-gradient(180deg, rgba(124, 92, 255, 0.9), rgba(124, 92, 255, 0.65));
+  background: linear-gradient(180deg, #6b49e8, #5b3fd1);
   color: #fff;
 }
 
@@ -966,7 +966,7 @@
 }
 
 .field__link:hover {
-  color: var(--accent-2);
+  color: #c4b5ff;
 }
 
 .field__link:focus-visible {

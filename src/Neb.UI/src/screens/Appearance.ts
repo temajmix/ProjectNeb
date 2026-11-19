@@ -5,6 +5,7 @@ import { cloneTheme, defaultTheme, isHexColour, normalizeTheme } from "../state"
 import { button, el, panel, skeletonPanel, switchControl } from "../components/controls";
 import { resetSectionCard } from "../components/ResetSection";
 import { showToast } from "../components/toast";
+import { watchFocus } from "../components/focus";
 
 const colourFields: ReadonlyArray<{ field: keyof ThemeColors; label: MessageKey }> = [
   { field: "background", label: "appearance.colors.background" },
@@ -190,6 +191,7 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
   let dirtyChip: HTMLElement | null = null;
   let saveButton: HTMLButtonElement | null = null;
   let resetButton: HTMLButtonElement | null = null;
+  const focus = watchFocus(root);
 
   const dirty = (): boolean => JSON.stringify(draft) !== JSON.stringify(baseline);
 
@@ -257,6 +259,7 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     if (!isHexColour(value)) {
       invalid.add(field);
       input.setAttribute("aria-invalid", "true");
+      input.setAttribute("aria-errormessage", `${input.id}-error`);
       const error = input.closest(".color-field")?.querySelector<HTMLElement>(".field__error");
       if (error) {
         error.hidden = false;
@@ -268,6 +271,7 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
 
     invalid.delete(field);
     input.removeAttribute("aria-invalid");
+    input.removeAttribute("aria-errormessage");
     const error = input.closest(".color-field")?.querySelector<HTMLElement>(".field__error");
     if (error) {
       error.hidden = true;
@@ -330,6 +334,10 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     if (saving || invalid.size > 0) {
       if (invalid.size > 0) {
         showToast(ctx.i18n.t("appearance.invalidColour"), "error");
+        const first = invalid.values().next().value as keyof ThemeColors | undefined;
+        if (first) {
+          root.querySelector<HTMLInputElement>(`#colour-${first}`)?.focus();
+        }
       }
 
       return;
@@ -393,6 +401,7 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     dirtyChip = el("span", "pill pill--warn", ctx.i18n.t("appearance.unsaved"));
     dirtyChip.hidden = !dirty();
     dirtyChip.id = "appearance-dirty";
+    dirtyChip.setAttribute("role", "status");
 
     resetButton = button({
       label: ctx.i18n.t("common.reset"),
@@ -426,6 +435,7 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     const busy = applyingId === theme.id;
     const card = el("article", `preset-card${active ? " preset-card--active" : ""}`);
     card.dataset.theme = theme.id;
+    card.setAttribute("role", "listitem");
 
     const preview = el("div", "preset-card__preview");
     preview.setAttribute("aria-hidden", "true");
@@ -481,6 +491,7 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     });
     apply.disabled = active || busy || applyingId !== null;
     apply.dataset.action = "apply-theme";
+    apply.dataset.focus = `theme-apply-${theme.id}`;
     if (busy) {
       apply.classList.add("is-busy");
     }
@@ -501,6 +512,7 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     const builtins = themes.filter((theme) => theme.builtin);
     const custom = themes.filter((theme) => !theme.builtin);
     const gallery = el("div", "preset-gallery");
+    gallery.setAttribute("role", "list");
     for (const theme of builtins.length > 0 ? builtins : custom) {
       gallery.append(themeCard(theme));
     }
@@ -510,6 +522,7 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     const customThemes = builtins.length > 0 ? custom : [];
     if (customThemes.length > 0) {
       const more = el("div", "preset-gallery preset-gallery--custom");
+      more.setAttribute("role", "list");
       for (const theme of customThemes) {
         more.append(themeCard(theme));
       }
@@ -577,6 +590,7 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
       hex.spellcheck = false;
       hex.autocomplete = "off";
       hex.setAttribute("aria-label", `${ctx.i18n.t(entry.label)} #RRGGBB`);
+      hex.setAttribute("aria-describedby", `colour-${entry.field}-error`);
 
       picker.addEventListener("input", () => {
         hex.value = picker.value.toUpperCase();
@@ -600,6 +614,8 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
 
       controls.append(picker, hex);
       const error = el("span", "field__error", ctx.i18n.t("appearance.invalidColour"));
+      error.id = `colour-${entry.field}-error`;
+      error.setAttribute("role", "alert");
       error.hidden = true;
       field.append(label, controls, error);
       grid.append(field);
@@ -621,9 +637,13 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
   }): HTMLElement => {
     const row = el("div", "range-field");
     const head = el("div", "range-field__head");
-    head.append(el("label", "field__label", options.label));
+    const label = el("label", "field__label", options.label);
+    label.htmlFor = options.id;
+    head.append(label);
 
-    const output = el("span", "range-field__value");
+    const output = el("output", "range-field__value");
+    output.htmlFor = options.id;
+    output.setAttribute("aria-live", "polite");
     const format = (): string => {
       if (!options.suffix) {
         return String(options.value);
@@ -909,6 +929,7 @@ export function createAppearanceScreen(ctx: AppContext): Screen {
     grid.append(left, right);
     root.replaceChildren(renderHeader(), grid, renderReset());
     setDirtyChrome();
+    focus.restore();
   };
 
   const activate = async (): Promise<void> => {

@@ -6,6 +6,7 @@ import { el, panel, switchControl } from "../components/controls";
 import { icon, type IconName } from "../components/icons";
 import { confirmDialog } from "../components/Modal";
 import { showToast } from "../components/toast";
+import { watchFocus } from "../components/focus";
 
 type ComponentId = "bar" | "dock" | "launcher" | "wallpaper";
 
@@ -61,6 +62,7 @@ export function createOverview(ctx: AppContext): OverviewScreen {
   const busy = new Set<string>();
   let lastCheck: string | null = null;
   let activated = false;
+  const focus = watchFocus(root);
 
   /**
    * «Работает / Частично / Остановлено». The processes' own `running` flags win; the component
@@ -398,8 +400,10 @@ export function createOverview(ctx: AppContext): OverviewScreen {
     });
 
     const list = el("div", "component-list");
+    list.setAttribute("role", "list");
     for (const component of components) {
       const row = el("div", "component");
+      row.setAttribute("role", "listitem");
       const glyph = el("span", "component__icon");
       glyph.innerHTML = icon(component.icon, 17);
 
@@ -534,6 +538,7 @@ export function createOverview(ctx: AppContext): OverviewScreen {
     const grid = el("div", "overview__grid");
     grid.append(renderComponents(), renderActions());
     root.replaceChildren(renderHeader(), renderMetrics(), renderWinStrip(), grid);
+    focus.restore();
   };
 
   render();

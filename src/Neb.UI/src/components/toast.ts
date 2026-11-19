@@ -7,13 +7,14 @@ let timer = 0;
 /**
  * One toast at a time, bottom centre. `success` confirms a write, `error` says a call did not land
  * (including a method the host build does not have) and `info` is neutral.
+ *
+ * A toast is a live region: an error is assertive so a failed save is announced even while the
+ * focus is on a form control, while a success message waits for a pause.
  */
 export function showToast(message: string, kind: ToastKind = "info"): void {
   if (!toast || !toast.isConnected) {
     toast = document.createElement("div");
     toast.className = "toast";
-    toast.setAttribute("role", "status");
-    toast.setAttribute("aria-live", "polite");
 
     dot = document.createElement("span");
     dot.className = "toast__dot";
@@ -32,6 +33,9 @@ export function showToast(message: string, kind: ToastKind = "info"): void {
   }
 
   toast.dataset.kind = kind;
+  toast.setAttribute("role", kind === "error" ? "alert" : "status");
+  toast.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
+  toast.setAttribute("aria-atomic", "true");
   toast.classList.add("toast--visible");
 
   window.clearTimeout(timer);

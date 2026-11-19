@@ -86,6 +86,8 @@ export function createShortcuts(i18n: I18n): ShortcutsDialog {
   const body = document.createElement("div");
   body.className = "shortcuts__body";
 
+  let trigger: HTMLElement | null = null;
+
   const foot = document.createElement("footer");
   foot.className = "shortcuts__foot";
   const hint = document.createElement("span");
@@ -106,6 +108,14 @@ export function createShortcuts(i18n: I18n): ShortcutsDialog {
     if (event.target === dialog) {
       dialog.close();
     }
+  });
+
+  dialog.addEventListener("close", () => {
+    if (trigger && trigger.isConnected) {
+      trigger.focus({ preventScroll: true });
+    }
+
+    trigger = null;
   });
 
   const render = (): void => {
@@ -159,6 +169,7 @@ export function createShortcuts(i18n: I18n): ShortcutsDialog {
         return;
       }
 
+      trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       render();
       dialog.showModal();
       close.focus();

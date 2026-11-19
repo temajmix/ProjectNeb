@@ -119,6 +119,7 @@ export function createOnboarding(i18n: I18n, options: OnboardingOptions): Onboar
   let selection: OnboardingSelection = initialSelection();
   let changedModules = new Set<keyof OnboardingModules>();
   let restartBadge: RestartBadge | null = null;
+  let trigger: HTMLElement | null = null;
 
   const restart = async (): Promise<void> => {
     await options.onRestart();
@@ -329,6 +330,14 @@ export function createOnboarding(i18n: I18n, options: OnboardingOptions): Onboar
     void skipAll();
   });
 
+  dialog.addEventListener("close", () => {
+    if (trigger && trigger.isConnected) {
+      trigger.focus({ preventScroll: true });
+    }
+
+    trigger = null;
+  });
+
   render();
 
   return {
@@ -343,6 +352,7 @@ export function createOnboarding(i18n: I18n, options: OnboardingOptions): Onboar
       selection = initialSelection();
       changedModules = new Set();
       restartBadge = null;
+      trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       render();
       dialog.showModal();
       next.focus();

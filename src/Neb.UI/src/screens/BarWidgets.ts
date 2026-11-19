@@ -17,6 +17,8 @@ import {
 import { icon, type IconName } from "../components/icons";
 import { resetSectionCard } from "../components/ResetSection";
 import { showToast } from "../components/toast";
+import { watchFocus } from "../components/focus";
+import { countLabel, nouns } from "../i18n/plural";
 
 const kinds: ReadonlyArray<{ kind: WidgetKind; label: MessageKey; icon: IconName }> = [
   { kind: "clock", label: "bar.kind.clock", icon: "clock" },
@@ -54,6 +56,7 @@ export function createBarScreen(ctx: AppContext): Screen {
   let state: "idle" | "saving" | "saved" | "failed" = "idle";
   let timer = 0;
   let saveSeq = 0;
+  const focus = watchFocus(root);
 
   const saveLabel = (): { text: string; tone: "neutral" | "on" | "danger" } => {
     if (state === "saving") {
@@ -231,6 +234,8 @@ export function createBarScreen(ctx: AppContext): Screen {
     const status = el("span", "save-state");
     status.id = "bar-status";
     status.hidden = true;
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
     aside.append(status);
 
     head.append(copy, aside);
@@ -241,6 +246,7 @@ export function createBarScreen(ctx: AppContext): Screen {
     const card = el("article", `widget${widget.enabled ? "" : " widget--off"}`);
     card.dataset.widget = widget.id;
     card.tabIndex = -1;
+    card.setAttribute("role", "listitem");
     card.setAttribute("aria-label", ctx.i18n.t(kindLabel[widget.kind]));
 
     const grip = el("span", "widget__grip");
@@ -419,9 +425,11 @@ export function createBarScreen(ctx: AppContext): Screen {
 
     const up = iconButton("arrowUp", ctx.i18n.t("bar.moveUp"), () => moveWidget(widget.id, -1));
     up.dataset.move = "up";
+    up.dataset.focus = `widget-${widget.id}-up`;
     up.disabled = index === 0;
     const down = iconButton("arrowDown", ctx.i18n.t("bar.moveDown"), () => moveWidget(widget.id, 1));
     down.dataset.move = "down";
+    down.dataset.focus = `widget-${widget.id}-down`;
     down.disabled = index === widgets.length - 1;
     const remove = iconButton(
       "trash",
@@ -429,6 +437,7 @@ export function createBarScreen(ctx: AppContext): Screen {
       () => removeWidget(widget.id),
       "icon-btn--danger",
     );
+    remove.dataset.focus = `widget-${widget.id}-remove`;
     actions.append(up, down, remove);
 
     card.append(grip, main, actions);
@@ -455,6 +464,25 @@ export function createBarScreen(ctx: AppContext): Screen {
       list.append(item);
     }
 
+    list.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") {
+        return;
+      }
+
+      const items = Array.from(list.querySelectorAll<HTMLButtonElement>(".menu__item"));
+      const index = items.indexOf(document.activeElement as HTMLButtonElement);
+      const next =
+        event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? items.length - 1
+            : event.key === "ArrowDown"
+              ? (index + 1 + items.length) % items.length
+              : (index - 1 + items.length) % items.length;
+      event.preventDefault();
+      items[next]?.focus();
+    });
+
     menu.append(list);
     menu.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
@@ -475,7 +503,11 @@ export function createBarScreen(ctx: AppContext): Screen {
       className: "bar-screen__list",
     });
 
-    const count = el("div", "panel__subhead", ctx.i18n.t("bar.widgetCount", { count: widgets.length }));
+    const count = el(
+      "div",
+      "panel__subhead",
+      countLabel(ctx.i18n.language, widgets.length, nouns.widgets.ru, nouns.widgets.en),
+    );
     card.body.append(count);
 
     if (widgets.length === 0) {
@@ -496,6 +528,7 @@ export function createBarScreen(ctx: AppContext): Screen {
     }
 
     const list = el("div", "widget-list");
+    list.setAttribute("role", "list");
     widgets.forEach((widget, index) => {
       list.append(renderWidget(widget, index));
     });
@@ -623,6 +656,7 @@ export function createBarScreen(ctx: AppContext): Screen {
     root.replaceChildren(renderHeader(), grid, renderReset());
     renderPreview();
     updateStatus();
+    focus.restore();
   };
 
   const activate = async (): Promise<void> => {

@@ -13,6 +13,7 @@ import {
 } from "../components/controls";
 import { icon } from "../components/icons";
 import { showToast } from "../components/toast";
+import { watchFocus } from "../components/focus";
 
 /**
  * «Сеть и доступ» — the zapret pack.
@@ -344,6 +345,7 @@ export function createZapretScreen(ctx: AppContext): Screen {
   let testRunning = false;
   let testUnavailable = false;
   let testFailed = false;
+  const focus = watchFocus(root);
 
   const strategyName = (id: string | null): string => {
     if (!id) {
@@ -721,7 +723,9 @@ export function createZapretScreen(ctx: AppContext): Screen {
     }
 
     if (detectMiss) {
-      wrap.append(el("p", "zapret__detectMiss", l("detectMiss")));
+      const miss = el("p", "zapret__detectMiss", l("detectMiss"));
+      miss.setAttribute("role", "status");
+      wrap.append(miss);
     }
 
     const toggle = button({
@@ -764,8 +768,10 @@ export function createZapretScreen(ctx: AppContext): Screen {
     input.placeholder = t("zapret.import.placeholder");
     input.value = importPath;
     input.disabled = busy !== null;
+    input.setAttribute("aria-describedby", "zapret-import-error");
     if (importError) {
       input.setAttribute("aria-invalid", "true");
+      input.setAttribute("aria-errormessage", "zapret-import-error");
     }
 
     input.addEventListener("input", () => {
@@ -773,6 +779,7 @@ export function createZapretScreen(ctx: AppContext): Screen {
       if (importError && input.value.trim() !== "") {
         importError = false;
         input.removeAttribute("aria-invalid");
+        input.removeAttribute("aria-errormessage");
         const error = manual.querySelector<HTMLElement>(".field__error");
         if (error) {
           error.hidden = true;
@@ -803,6 +810,8 @@ export function createZapretScreen(ctx: AppContext): Screen {
     row.append(input, action);
 
     const error = el("span", "field__error", t("zapret.import.empty"));
+    error.id = "zapret-import-error";
+    error.setAttribute("role", "alert");
     error.hidden = !importError;
 
     manual.append(label, row, error);
@@ -985,7 +994,11 @@ export function createZapretScreen(ctx: AppContext): Screen {
 
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        void start();
+        const row = rows.find((entry) => entry.dataset.strategy === selected) ?? rows[0];
+        if (row) {
+          applySelected(row.dataset.strategy ?? null);
+          row.focus();
+        }
         return;
       }
 
@@ -1067,13 +1080,13 @@ export function createZapretScreen(ctx: AppContext): Screen {
     }
 
     const failedChecks = testChecks.filter((check) => !check.ok).length;
-    card.body.append(
-      el(
-        "span",
-        `zapret__summary${failedChecks > 0 ? " zapret__summary--bad" : ""}`,
-        t("zapret.test.summary", { passed: testChecks.length - failedChecks, total: testChecks.length }),
-      ),
+    const summary = el(
+      "span",
+      `zapret__summary${failedChecks > 0 ? " zapret__summary--bad" : ""}`,
+      t("zapret.test.summary", { passed: testChecks.length - failedChecks, total: testChecks.length }),
     );
+    summary.setAttribute("role", "status");
+    card.body.append(summary);
 
     const list = el("ul", "check-list");
     for (const check of testChecks) {
@@ -1137,6 +1150,7 @@ export function createZapretScreen(ctx: AppContext): Screen {
     side.append(renderImportCard(), renderSelfTest());
     grid.append(renderStrategies(), side);
     root.replaceChildren(renderHeader(), renderStatusCard(), grid);
+    focus.restore();
   };
 
   const activate = async (): Promise<void> => {

@@ -23,6 +23,8 @@ export interface RestartBadge {
 export function createRestartBadge(options: RestartBadgeOptions): RestartBadge {
   const root = el("div", "restart-badge");
   root.hidden = true;
+  root.setAttribute("role", "status");
+  root.setAttribute("aria-live", "polite");
 
   root.append(el("span", "pill pill--warn", options.label));
   if (options.subject) {

@@ -13,6 +13,7 @@ import {
 } from "../components/controls";
 import { icon } from "../components/icons";
 import { showToast } from "../components/toast";
+import { watchFocus } from "../components/focus";
 
 interface LastCheck {
   at: string;
@@ -32,6 +33,7 @@ export function createUpdatesScreen(ctx: AppContext): Screen {
   let channel: "stable" | "beta" = ctx.config().updates.channel;
   let autoUpdate = ctx.config().updates.autoUpdate;
   let busy = false;
+  const focus = watchFocus(root);
 
   const loadNotes = async (): Promise<void> => {
     notesLoading = true;
@@ -106,6 +108,7 @@ export function createUpdatesScreen(ctx: AppContext): Screen {
     } else {
       channel = previous;
       render();
+      root.querySelector<HTMLElement>(`#updates-channel-${channel}`)?.focus();
     }
   };
 
@@ -147,6 +150,8 @@ export function createUpdatesScreen(ctx: AppContext): Screen {
   const renderResult = (): HTMLElement => {
     const area = el("div", "update-result");
     area.id = "update-result";
+    area.setAttribute("role", "status");
+    area.setAttribute("aria-live", "polite");
 
     if (checking) {
       area.append(skeleton(62));
@@ -245,6 +250,7 @@ export function createUpdatesScreen(ctx: AppContext): Screen {
       segmented<"stable" | "beta">({
         value: channel,
         label: ctx.i18n.t("updates.channel"),
+        id: "updates-channel",
         disabled: busy,
         items: [
           { value: "stable", label: ctx.i18n.t("updates.stable") },
@@ -269,6 +275,7 @@ export function createUpdatesScreen(ctx: AppContext): Screen {
         checked: autoUpdate,
         label: ctx.i18n.t("updates.auto"),
         disabled: busy,
+        id: "updates-auto",
         onToggle: (next) => void setAuto(next),
       }),
     );
@@ -331,6 +338,7 @@ export function createUpdatesScreen(ctx: AppContext): Screen {
     main.append(renderCheckPanel(), renderNotesPanel());
     grid.append(main, renderChannelPanel());
     root.replaceChildren(renderHeader(), grid);
+    focus.restore();
   };
 
   const activate = async (): Promise<void> => {
