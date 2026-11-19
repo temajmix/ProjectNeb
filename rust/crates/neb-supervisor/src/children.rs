@@ -17,9 +17,13 @@ use serde_json::Value;
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, WAIT_OBJECT_0,
 };
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::Threading::{
-    CreateMutexW, CreateProcessW, GetExitCodeProcess, PROCESS_INFORMATION, STARTUPINFOW,
-    TerminateProcess, WaitForSingleObject,
+    CreateMutexW, CreateProcessW, GetExitCodeProcess, INFINITE, OpenProcess, PROCESS_INFORMATION,
+    PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    QueryFullProcessImageNameW, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -41,6 +45,9 @@ const STOP_BUDGET: Duration = Duration::from_secs(2);
 
 /// Pause between polls of a dying child inside [`Child::stop`].
 const STOP_POLL: Duration = Duration::from_millis(50);
+
+/// Longest image path [`QueryFullProcessImageNameW`] is asked for.
+const PATH_UNITS: usize = 32_768;
 
 /// Waits that [`RestartPlanner`] hands out: `step` is the backoff, `delay` what is actually used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +191,12 @@ pub struct ChildSpec {
     pub mutex: String,
     /// Whether the configuration asks for this child at all.
     pub enabled: bool,
+    /// Whether a copy that already runs from this executable should be adopted instead of spawned.
+    ///
+    /// Only the real children next to the supervisor set this: a diagnostic `--spawn-test` command
+    /// names a shared executable such as `cmd.exe`, and adopting an unrelated `cmd.exe` would let
+    /// the supervisor kill a process the user started.
+    pub adopt: bool,
 }
 
 impl ChildSpec {
@@ -195,7 +208,14 @@ impl ChildSpec {
             args: Vec::new(),
             mutex: format!(r"Local\ProjectNeb.supervisor.child.{name}"),
             enabled,
+            adopt: false,
         }
+    }
+
+    /// The same child, with adoption of an already-running copy turned on.
+    pub fn adopting(mut self) -> Self {
+        self.adopt = true;
+        self
     }
 
     /// A child running an arbitrary command line, used by `--spawn-test`.
@@ -362,6 +382,67 @@ impl Process {
         self.pid
     }
 
+    /// Takes over a process this supervisor did not start.
+    ///
+    /// The handle is opened with the three rights the child lifecycle needs: wait on it, read its
+    /// exit code, and stop it on `app.quit`. A process that has already ended is not adopted, so a
+    /// stale pid cannot turn into a phantom "running" child.
+    pub fn adopt(pid: u32) -> Option<Self> {
+        let access = PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE;
+
+        // SAFETY: the call takes a plain pid and returns a handle owned by this value.
+        let handle = unsafe { OpenProcess(access, false, pid) }.ok()?;
+        let process = Self { pid, handle };
+
+        (!process.has_exited()).then_some(process)
+    }
+
+    /// The pid of a process whose full image path is `exe`, matched case-insensitively.
+    ///
+    /// This is how a supervisor that starts after a crash finds the children the previous one left
+    /// behind: a child's own single-instance mutex would make a second copy exit immediately.
+    pub fn running_instance(exe: &Path) -> Option<u32> {
+        let target = resolve_executable(exe, std::env::var_os("PATH").as_deref());
+        let target = target.to_string_lossy().to_lowercase();
+        let self_pid = std::process::id();
+
+        // SAFETY: a process snapshot takes no pointer and returns a handle this function closes.
+        let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+            return None;
+        };
+
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..PROCESSENTRY32W::default()
+        };
+        // SAFETY: `snapshot` is open and `entry` is live with its size declared in `dwSize`.
+        let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+        let mut found = None;
+
+        while more {
+            let pid = entry.th32ProcessID;
+            if pid != 0 && pid != self_pid {
+                if let Some(path) = image_path(pid) {
+                    if path.to_string_lossy().to_lowercase() == target {
+                        found = Some(pid);
+                        break;
+                    }
+                }
+            }
+
+            entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+            // SAFETY: same as the first call: `entry` stays live and correctly sized.
+            more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+        }
+
+        // SAFETY: the handle came from `CreateToolhelp32Snapshot` and is closed exactly once.
+        unsafe {
+            let _ = CloseHandle(snapshot);
+        }
+
+        found
+    }
+
     /// Whether the process has ended, without blocking.
     pub fn has_exited(&self) -> bool {
         // SAFETY: the handle is a live process handle owned by this value; a zero timeout only
@@ -396,6 +477,57 @@ impl Drop for Process {
     }
 }
 
+/// The full image path of `pid`, or `None` when the process cannot be queried.
+fn image_path(pid: u32) -> Option<PathBuf> {
+    // SAFETY: the call takes a plain pid and the returned handle is closed before returning.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+
+    let mut buffer = [0u16; PATH_UNITS];
+    let mut size = u32::try_from(buffer.len()).ok()?;
+    // SAFETY: `buffer` and `size` are live; the call writes at most `size` units and reports how many.
+    let queried = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        )
+    };
+
+    // SAFETY: the handle came from `OpenProcess` above and is closed exactly once, here.
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+
+    if queried.is_err() || size == 0 {
+        return None;
+    }
+
+    let path = PathBuf::from(String::from_utf16_lossy(
+        &buffer[..usize::try_from(size).ok()?],
+    ));
+
+    (!path.as_os_str().is_empty()).then_some(path)
+}
+
+/// Blocks the calling thread until `pid` ends.
+///
+/// The waiter thread of an adopted child calls this: it holds a second `SYNCHRONIZE` handle so the
+/// exit of a process this supervisor did not create is observed the same way as a spawned one. The
+/// restart itself stays with the loop and its planner, so the throttle is never bypassed.
+pub fn wait_for_exit(pid: u32) {
+    // SAFETY: the call takes a plain pid and the handle is closed before returning.
+    let Ok(handle) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else {
+        return;
+    };
+
+    // SAFETY: `handle` is a live synchronisation handle; `INFINITE` waits until the process ends.
+    unsafe {
+        let _ = WaitForSingleObject(handle, INFINITE);
+        let _ = CloseHandle(handle);
+    }
+}
+
 /// One managed child: its spec, the process it currently owns, and the restart state.
 #[derive(Debug)]
 pub struct Child {
@@ -404,6 +536,8 @@ pub struct Child {
     planner: RestartPlanner,
     last_start: Option<Instant>,
     next_start: Option<Instant>,
+    /// Whether `process` came from an earlier supervisor rather than from [`Child::start`].
+    adopted: bool,
     /// Held for as long as this supervisor owns the slot; dropping it frees the slot for the next
     /// run, which is why the field is never read.
     _mutex: Option<NamedMutex>,
@@ -415,6 +549,11 @@ impl Child {
     ///
     /// A contended mutex is not an error: it means another ProjectNeb process already runs this
     /// child, so this supervisor must never start a second copy. The reason is kept for the log.
+    ///
+    /// When the mutex is free but the executable is already running, that process is adopted: the
+    /// previous supervisor may have crashed and left its children behind, and their own
+    /// single-instance mutexes would make a fresh copy exit immediately. Adoption is opt-in because
+    /// a diagnostic command such as `cmd.exe` is shared with the rest of the session.
     pub fn new(spec: ChildSpec) -> Self {
         let (mutex, blocked) = match NamedMutex::acquire(&spec.mutex) {
             Ok((mutex, true)) => (Some(mutex), None),
@@ -428,12 +567,24 @@ impl Child {
             Err(error) => (None, Some(error.to_string())),
         };
 
+        let (process, adopted) = match &mutex {
+            Some(_) if blocked.is_none() && spec.adopt => {
+                match Process::running_instance(&spec.exe).and_then(Process::adopt) {
+                    Some(process) => (Some(process), true),
+                    None => (None, false),
+                }
+            }
+            _ => (None, false),
+        };
+        let last_start = process.as_ref().map(|_| Instant::now());
+
         Self {
             spec,
-            process: None,
+            process,
             planner: RestartPlanner::default(),
-            last_start: None,
+            last_start,
             next_start: None,
+            adopted,
             _mutex: mutex,
             blocked,
         }
@@ -452,6 +603,11 @@ impl Child {
     /// Whether the configuration asks for this child.
     pub fn enabled(&self) -> bool {
         self.spec.enabled
+    }
+
+    /// Whether the running process was adopted from an earlier supervisor.
+    pub fn adopted(&self) -> bool {
+        self.adopted
     }
 
     /// Why this child can never be started in this session, if it cannot.
@@ -506,6 +662,7 @@ impl Child {
 
         let pid = process.pid();
         self.process = Some(process);
+        self.adopted = false;
         self.last_start = Some(Instant::now());
         self.next_start = None;
 
@@ -942,6 +1099,127 @@ mod tests {
         assert_eq!(exit.pid, pid);
         assert!(child.poll().is_none(), "an exit is reported exactly once");
         assert!(child.pid().is_none());
+    }
+
+    /// A private copy of `cmd.exe`: adoption matches full image paths, so a shared executable would
+    /// make these tests depend on every other `cmd.exe` the session happens to run.
+    fn stub_executable(directory: &Path) -> PathBuf {
+        let source = std::env::var_os("COMSPEC")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+        let target = directory.join(format!("neb-adopt-stub-{}.exe", std::process::id()));
+        std::fs::copy(source, &target).expect("the stub is a copy of cmd.exe");
+        target
+    }
+
+    /// A stub that stays alive long enough to be adopted, killed and waited for.
+    fn stub_process(exe: &Path) -> std::process::Child {
+        std::process::Command::new(exe)
+            .args(["/c", "timeout", "30"])
+            .spawn()
+            .expect("the stub starts")
+    }
+
+    fn poll_until_exit(child: &mut Child) -> Exit {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(exit) = child.poll() {
+                return exit;
+            }
+            assert!(Instant::now() < deadline, "the stub must finish");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_process_is_found_by_its_full_image_path_whatever_the_case() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let exe = stub_executable(directory.path());
+        let mut stub = stub_process(&exe);
+        let upper = PathBuf::from(exe.to_string_lossy().to_uppercase());
+
+        assert_eq!(
+            Process::running_instance(&upper),
+            Some(stub.id()),
+            "a path match must be case-insensitive"
+        );
+
+        let _ = stub.kill();
+        let _ = stub.wait();
+    }
+
+    #[test]
+    fn a_running_child_left_by_a_crashed_supervisor_is_adopted_and_restarted_after_the_throttle() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let exe = stub_executable(directory.path());
+        let mut stub = stub_process(&exe);
+
+        let child_spec = ChildSpec {
+            adopt: true,
+            ..ChildSpec::new(&format!("adopted-{}", std::process::id()), exe, true)
+        };
+        let mut child = Child::new(child_spec);
+
+        assert!(child.adopted(), "the running copy is taken over");
+        assert!(child.running(), "the adopted pid is alive");
+        assert_eq!(child.pid(), Some(stub.id()), "the real pid is published");
+        assert!(
+            child.blocked().is_none(),
+            "adoption does not read as a mutex problem"
+        );
+
+        let _ = stub.kill();
+        let _ = stub.wait();
+
+        let exit = poll_until_exit(&mut child);
+        assert_eq!(exit.pid, stub.id(), "the adopted process is the one reaped");
+        assert!(child.pid().is_none());
+
+        let delay = child.schedule_restart(exit.ran_for);
+        assert_eq!(
+            delay.delay, RESTART_THROTTLE,
+            "an adopted child that dies immediately waits out the throttle"
+        );
+    }
+
+    #[test]
+    fn an_adopted_child_is_terminated_by_the_same_stop_as_a_spawned_one() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let exe = stub_executable(directory.path());
+        let mut stub = stub_process(&exe);
+
+        let child_spec = ChildSpec {
+            adopt: true,
+            ..ChildSpec::new(&format!("adopted-stop-{}", std::process::id()), exe, true)
+        };
+        let mut child = Child::new(child_spec);
+
+        let stopped = child.stop().expect("the adopted process is stopped");
+        assert_eq!(stopped, stub.id());
+        assert!(!child.running(), "a stopped adopted child reads as stopped");
+        assert!(stub.wait().is_ok(), "the real process ended");
+    }
+
+    #[test]
+    fn a_diagnostic_command_never_adopts_a_shared_executable() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let exe = stub_executable(directory.path());
+        let mut stub = stub_process(&exe);
+
+        let child_spec = ChildSpec {
+            args: vec!["/c".to_owned(), "timeout".to_owned(), "30".to_owned()],
+            ..ChildSpec::new(&format!("not-adopted-{}", std::process::id()), exe, true)
+        };
+        let child = Child::new(child_spec);
+
+        assert!(
+            !child.adopted(),
+            "--spawn-test must not take over a process the user started"
+        );
+        assert!(child.pid().is_none());
+
+        let _ = stub.kill();
+        let _ = stub.wait();
     }
 }
 

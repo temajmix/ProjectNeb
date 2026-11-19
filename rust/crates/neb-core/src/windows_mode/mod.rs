@@ -580,6 +580,23 @@ pub fn plan_restore(previous: &RawValue, current: &RawValue) -> RawValue {
     }
 }
 
+/// Whether `current` is the value `toggle` writes while it hides the chrome.
+///
+/// A record is only real while the registry still holds this state; anything else means the user,
+/// Explorer or another tool has taken the value back.
+fn is_hidden_state(toggle: Toggle, current: &RawValue) -> bool {
+    let descriptor = toggle.descriptor();
+
+    match descriptor.kind {
+        ValueKind::Layout => {
+            matches!(current, RawValue::Binary { value } if taskbar::is_hidden(value))
+        }
+        ValueKind::Dword => {
+            matches!(current, RawValue::Dword { value } if Some(*value) == descriptor.hidden)
+        }
+    }
+}
+
 /// One step a [`Session::sync`] took, for the supervisor log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
@@ -805,6 +822,44 @@ impl Session {
         }
 
         changes
+    }
+
+    /// Drops the records whose toggle is no longer in the hidden state, and never writes the
+    /// registry.
+    ///
+    /// The file is written before the registry, which is what makes a crash recoverable, but it is
+    /// also what lets it drift: after a supervisor has been killed, Explorer may put the taskbar
+    /// back while `windows-mode.json` still says `applied: true`. A start must not "restore" a value
+    /// the user has changed themselves, so every record is checked against the live value first.
+    /// A record stays only while the registry still holds what the mode wrote; a value that cannot
+    /// be read is kept, because destroying the way back on a transient failure would be worse.
+    pub fn reconcile(&mut self) -> Vec<Toggle> {
+        let mut dropped = Vec::new();
+
+        for toggle in Toggle::ALL {
+            if !self.state.is_applied(toggle) {
+                continue;
+            }
+
+            let Ok(current) = self.read(toggle) else {
+                continue;
+            };
+
+            if is_hidden_state(toggle, &current) {
+                continue;
+            }
+
+            self.state.toggles.remove(&toggle);
+            dropped.push(toggle);
+        }
+
+        if !dropped.is_empty() {
+            // A failed write leaves the old file, which the next start reconciles again; the
+            // in-memory state is already correct, so nothing is restored over the user's value.
+            let _ = self.save_state();
+        }
+
+        dropped
     }
 
     /// Brings the registry in line with `desired`, applying and restoring only what differs.
@@ -1385,6 +1440,102 @@ mod tests {
             "a fully restored mode leaves nothing behind"
         );
         assert_eq!(session.applied_count(), 0);
+    }
+
+    #[test]
+    fn reconciling_drops_a_record_the_registry_no_longer_hides() {
+        let (directory, registry, mut session) = session();
+        registry.set(Toggle::DesktopIcons, RawValue::Dword { value: 0 });
+        session.sync(selection(&[Toggle::DesktopIcons]));
+        let writes = registry.writes();
+        let notifications = registry.notifications().len();
+
+        // The user showed the icons again while the file still says applied.
+        registry.set(Toggle::DesktopIcons, RawValue::Dword { value: 0 });
+
+        assert_eq!(session.reconcile(), vec![Toggle::DesktopIcons]);
+        assert_eq!(session.applied_count(), 0);
+        assert_eq!(
+            registry.writes(),
+            writes,
+            "reconciling must never write a registry value"
+        );
+        assert_eq!(registry.notifications().len(), notifications);
+        assert_eq!(
+            registry.get(Toggle::DesktopIcons),
+            RawValue::Dword { value: 0 },
+            "the value the user put back stays"
+        );
+        assert!(
+            !directory.path().join(STATE_FILE).exists(),
+            "the file now matches reality"
+        );
+    }
+
+    #[test]
+    fn reconciling_drops_a_taskbar_record_the_os_restored() {
+        let (directory, registry, mut session) = session();
+        let original = layout(0b0000_0010);
+        registry.set(
+            Toggle::Taskbar,
+            RawValue::Binary {
+                value: original.clone(),
+            },
+        );
+        session.sync(selection(&[Toggle::Taskbar]));
+        let writes = registry.writes();
+
+        // Explorer (or the user) turned auto-hide off while the file still says applied.
+        registry.set(
+            Toggle::Taskbar,
+            RawValue::Binary {
+                value: original.clone(),
+            },
+        );
+
+        assert_eq!(session.reconcile(), vec![Toggle::Taskbar]);
+        assert_eq!(session.applied_count(), 0);
+        assert_eq!(registry.writes(), writes, "the layout is not written back");
+        assert_eq!(
+            registry.get(Toggle::Taskbar),
+            RawValue::Binary { value: original }
+        );
+        assert!(!directory.path().join(STATE_FILE).exists());
+    }
+
+    #[test]
+    fn reconciling_leaves_a_record_that_still_matches_the_registry() {
+        let (directory, registry, mut session) = session();
+        session.sync(selection(&[Toggle::TaskView]));
+        let writes = registry.writes();
+
+        assert!(session.reconcile().is_empty());
+        assert_eq!(session.applied_count(), 1, "the toggle is still hidden");
+        assert_eq!(registry.writes(), writes, "nothing was written");
+        assert_eq!(registry.get(Toggle::TaskView), RawValue::Dword { value: 0 });
+        assert!(
+            directory.path().join(STATE_FILE).exists(),
+            "a matching file is left alone"
+        );
+    }
+
+    #[test]
+    fn reconciling_never_overwrites_a_third_value_the_user_chose() {
+        let (_directory, registry, mut session) = session();
+        registry.set(Toggle::SearchBox, RawValue::Dword { value: 2 });
+        session.sync(selection(&[Toggle::SearchBox]));
+        let writes = registry.writes();
+
+        // Not the hidden value and not the stored previous value: the user picked a third mode.
+        registry.set(Toggle::SearchBox, RawValue::Dword { value: 1 });
+
+        assert_eq!(session.reconcile(), vec![Toggle::SearchBox]);
+        assert_eq!(session.applied_count(), 0);
+        assert_eq!(registry.writes(), writes);
+        assert_eq!(
+            registry.get(Toggle::SearchBox),
+            RawValue::Dword { value: 1 }
+        );
     }
 
     #[test]

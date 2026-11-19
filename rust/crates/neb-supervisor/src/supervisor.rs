@@ -29,7 +29,7 @@ use crate::children::{Child, ChildSpec, Enabled, NamedMutex};
 use crate::settings;
 use crate::taskbar_repair::{self, Outcome};
 use crate::tray::Tray;
-use crate::update::{self, UpdatesHandle};
+use crate::update::{self, UpdatesHandle, WhatsNew};
 use crate::windows_mode::Mode;
 
 /// Pipe the supervisor answers on.
@@ -519,8 +519,22 @@ pub struct Supervisor {
     tray: Option<Tray>,
     /// Update checker worker, absent when updates are disabled.
     updates: Option<UpdatesHandle>,
+    /// The thread showing the release notes, while the dialog is open.
+    notes: Option<std::thread::JoinHandle<()>>,
     /// Held for the whole run: dropping it is what lets the next supervisor start.
     _instance: NamedMutex,
+}
+
+/// Renders the release notes and reports whether a dialog appeared.
+///
+/// The startup notes run through this on a worker thread, so a dialog that waits for the user
+/// cannot stop the loop that supervises children. Tests inject a closure that blocks on a channel
+/// until the test says the "dialog" is closed.
+pub type NotesDialog = Box<dyn FnOnce(&WhatsNew) -> bool + Send + 'static>;
+
+/// The production notes dialog: the same task dialog the tray menu opens.
+fn notes_dialog(notes: &WhatsNew) -> bool {
+    crate::tray::show_whats_new_dialog(None, notes)
 }
 
 impl Supervisor {
@@ -574,6 +588,7 @@ impl Supervisor {
             root,
             tray: None,
             updates: None,
+            notes: None,
             _instance: instance,
         };
 
@@ -586,6 +601,14 @@ impl Supervisor {
                     "{}: {reason}, not starting a second copy",
                     child.name()
                 ));
+            } else if child.adopted() {
+                let pid = child.pid().unwrap_or_default();
+                supervisor.reporter.info(&format!(
+                    "{}: adopted the running '{}' (pid {pid})",
+                    child.name(),
+                    child.exe().display()
+                ));
+                supervisor.watch_adopted(child.name().to_owned(), pid);
             }
             supervisor.children.push(child);
         }
@@ -593,6 +616,7 @@ impl Supervisor {
         for index in 0..supervisor.children.len() {
             if supervisor.children[index].enabled()
                 && supervisor.children[index].blocked().is_none()
+                && !supervisor.children[index].adopted()
             {
                 supervisor.start_child(index);
             }
@@ -638,6 +662,8 @@ impl Supervisor {
 
     /// Reaps dead children, starts the ones that are due and applies queued commands.
     pub fn tick(&mut self) {
+        self.poll_whats_new();
+
         if let Some(tray) = &self.tray {
             tray.pump();
         }
@@ -787,8 +813,16 @@ impl Supervisor {
         ));
     }
 
-    /// Shows the notes of the version that is running, once.
-    fn show_whats_new(&self) {
+    /// Shows the notes of the version that is running, once, without blocking the loop.
+    fn show_whats_new(&mut self) {
+        self.show_whats_new_with(Box::new(notes_dialog));
+    }
+
+    /// Starts the notes dialog on its own thread with `dialog` as the renderer.
+    ///
+    /// Everything the thread needs is owned: the notes, the data root and a reporter. The shown
+    /// marker is written by that thread after the dialog returns, which is what "shown" means.
+    fn show_whats_new_with(&mut self, dialog: NotesDialog) {
         let Some(notes) = update::read_whats_new(&self.root) else {
             return;
         };
@@ -797,29 +831,44 @@ impl Supervisor {
             return;
         }
 
-        let shown = match &self.tray {
-            Some(tray) => tray.show_whats_new(&notes, true),
-            None => {
-                let shown = crate::tray::show_whats_new_dialog(None, &notes);
-                if shown {
-                    if let Err(error) = update::mark_shown(&self.root) {
-                        self.reporter.warn(&format!(
-                            "whats-new: cannot mark the notes as shown: {error}"
-                        ));
-                    }
-                }
-                shown
+        let root = self.root.clone();
+        let reporter = self.reporter.clone();
+        self.notes = Some(std::thread::spawn(move || {
+            if !dialog(&notes) {
+                return;
             }
-        };
 
-        if shown {
-            self.reporter
-                .info(&format!("whats-new: showed the notes of {}", notes.version));
+            match update::mark_shown(&root) {
+                Ok(()) => {
+                    reporter.info(&format!("whats-new: showed the notes of {}", notes.version))
+                }
+                Err(error) => reporter.warn(&format!(
+                    "whats-new: cannot mark the notes as shown: {error}"
+                )),
+            }
+        }));
+    }
+
+    /// Reaps the notes thread once its dialog has closed.
+    ///
+    /// A dialog that is still open is left alone: joining it here would put the block back into the
+    /// loop, which is the defect this split exists to remove.
+    fn poll_whats_new(&mut self) {
+        if self
+            .notes
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            if let Some(handle) = self.notes.take() {
+                let _ = handle.join();
+            }
         }
     }
 
     /// Stops every child and closes the pipe.
     pub fn shutdown(&mut self) {
+        self.poll_whats_new();
+
         // The window is not a supervised child; leaving it behind would keep a WebView2 tree
         // alive after "Exit" and block an updater from replacing `neb-app.exe`.
         crate::settings::close_window();
@@ -870,6 +919,21 @@ impl Supervisor {
                     .warn(&format!("{name}: retrying in {} s", seconds(delay.delay)));
             }
         }
+    }
+
+    /// Parks a thread on the handle of an adopted process so its exit is noticed even though this
+    /// supervisor never created it.
+    ///
+    /// The thread does not restart anything itself: the loop polls every child, reaps the exit and
+    /// hands it to the restart planner, so an adopted child follows the same throttle and backoff
+    /// as a spawned one. The waiter only ends the wait promptly and says so in the log.
+    fn watch_adopted(&self, name: String, pid: u32) {
+        let reporter = self.reporter.clone();
+
+        std::thread::spawn(move || {
+            crate::children::wait_for_exit(pid);
+            reporter.info(&format!("{name}: adopted pid {pid} exited"));
+        });
     }
 
     /// Stops a child and starts it again; a manual restart is not throttled.
@@ -987,12 +1051,12 @@ fn specs(options: &Options) -> Vec<ChildSpec> {
     let windhawk = sibling(WINDHAWK_EXE);
 
     vec![
-        ChildSpec::new("shell", shell, enabled.shell),
-        ChildSpec::new("wallpaper", wallpaper, enabled.wallpaper),
-        ChildSpec::new("discord", discord, enabled.discord),
-        ChildSpec::new("wm", wm, enabled.wm),
-        ChildSpec::new("zapret", zapret, enabled.zapret),
-        ChildSpec::new("windhawk", windhawk, enabled.windhawk),
+        ChildSpec::new("shell", shell, enabled.shell).adopting(),
+        ChildSpec::new("wallpaper", wallpaper, enabled.wallpaper).adopting(),
+        ChildSpec::new("discord", discord, enabled.discord).adopting(),
+        ChildSpec::new("wm", wm, enabled.wm).adopting(),
+        ChildSpec::new("zapret", zapret, enabled.zapret).adopting(),
+        ChildSpec::new("windhawk", windhawk, enabled.windhawk).adopting(),
     ]
 }
 
@@ -1022,6 +1086,37 @@ mod tests {
 
     fn shared() -> Shared {
         Shared::new(vec!["shell".to_owned(), "wallpaper".to_owned()])
+    }
+
+    /// A supervisor with no children, no pipe and no tray, rooted at `root`.
+    ///
+    /// The loop's own fields are private but this module is their parent, so a test can build the
+    /// value without starting the resident services.
+    fn idle_supervisor(root: PathBuf) -> Supervisor {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let name = format!(
+            r"Local\ProjectNeb.supervisor.idle-test.{}.{serial}",
+            std::process::id()
+        );
+        let (instance, first) = NamedMutex::acquire(&name).expect("the test mutex");
+        assert!(first);
+
+        Supervisor {
+            reporter: Reporter {
+                log: None,
+                echo: false,
+            },
+            shared: Arc::new(Shared::new(Vec::new())),
+            server: None,
+            children: Vec::new(),
+            started: Instant::now(),
+            root,
+            tray: None,
+            updates: None,
+            notes: None,
+            _instance: instance,
+        }
     }
 
     fn request(method: &str, params: Option<Value>) -> Request {
@@ -1280,6 +1375,10 @@ mod tests {
             !specs[2].enabled,
             "the shipped config leaves Discord off until an app id exists"
         );
+        assert!(
+            specs.iter().all(|spec| spec.adopt),
+            "the real children are adopted when an earlier supervisor left them running"
+        );
     }
 
     #[test]
@@ -1295,6 +1394,10 @@ mod tests {
         assert_eq!(specs[0].name, "test");
         assert_eq!(specs[0].exe, PathBuf::from("cmd.exe"));
         assert!(specs[0].enabled);
+        assert!(
+            !specs[0].adopt,
+            "a diagnostic command must not take over a shared executable"
+        );
     }
 
     #[test]
@@ -1541,5 +1644,112 @@ mod tests {
         assert_eq!(state["applied"]["widgets"], json!(false));
         assert_eq!(registry.get(Toggle::Widgets), RawValue::Absent);
         assert_eq!(registry.get(Toggle::Copilot), RawValue::Absent);
+    }
+
+    #[test]
+    fn the_whats_new_dialog_does_not_block_the_tick() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let root = directory.path().to_path_buf();
+        let version = update::Version::parse(env!("CARGO_PKG_VERSION")).expect("valid version");
+        update::write_whats_new(&root, &version, "notes", "").expect("notes written");
+
+        let mut supervisor = idle_supervisor(root.clone());
+
+        // A child that ends on its own, so the tick has real supervision to do while the dialog is
+        // "open" — the defect was that the loop stopped reaping during the modal box.
+        let mut quick = Child::new(ChildSpec {
+            args: vec!["/c".to_owned(), "exit".to_owned(), "3".to_owned()],
+            ..ChildSpec::new("quick-notes", PathBuf::from("cmd.exe"), true)
+        });
+        quick.start().expect("the short-lived child starts");
+        std::thread::sleep(Duration::from_millis(300));
+        supervisor.children.push(quick);
+
+        let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        supervisor.show_whats_new_with(Box::new(move |_notes| {
+            let _ = opened_tx.send(());
+            let _ = release_rx.recv();
+            true
+        }));
+
+        opened_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the dialog opens on its own thread");
+
+        let started = Instant::now();
+        supervisor.tick();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a tick must not wait for the dialog: {elapsed:?}"
+        );
+        assert!(
+            supervisor.children[0].pid().is_none(),
+            "the tick reaped the child while the dialog was open"
+        );
+        assert!(
+            !update::read_whats_new(&root).expect("notes").shown,
+            "the marker is written only after the dialog closes"
+        );
+
+        release_tx.send(()).expect("the test closes the dialog");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !update::read_whats_new(&root).expect("notes").shown {
+            assert!(
+                Instant::now() < deadline,
+                "the marker must be written once the dialog closed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        supervisor.poll_whats_new();
+        assert!(
+            supervisor.notes.is_none(),
+            "the finished dialog thread is reaped"
+        );
+    }
+
+    #[test]
+    fn shutdown_stops_a_child_it_adopted() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let source = std::env::var_os("COMSPEC")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+        let exe = directory.path().join("neb-adopted-shutdown.exe");
+        std::fs::copy(source, &exe).expect("a private copy of cmd.exe");
+
+        let mut stub = std::process::Command::new(&exe)
+            .args(["/c", "timeout", "30"])
+            .spawn()
+            .expect("the stub starts");
+
+        let child = Child::new(ChildSpec {
+            adopt: true,
+            ..ChildSpec::new(
+                &format!("adopted-shutdown-{}", std::process::id()),
+                exe,
+                true,
+            )
+        });
+        assert!(child.adopted(), "the stub is adopted");
+
+        let mut supervisor = idle_supervisor(directory.path().to_path_buf());
+        supervisor.children.push(child);
+        supervisor.shutdown();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if stub.try_wait().expect("the stub is waitable").is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "shutdown must stop an adopted child"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }

@@ -170,7 +170,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "neb-app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "neb-core",
  "serde",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "neb-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "neb-core",
  "serde",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "neb-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "neb-discord"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "neb-core",
  "serde",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "neb-shell"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "neb-core",
  "serde",
@@ -235,7 +235,7 @@ dependencies = [
 
 [[package]]
 name = "neb-supervisor"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "neb-core",
  "serde",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "neb-updater"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "neb-core",
  "tempfile",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "neb-wallpaper"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "neb-core",
  "serde",
@@ -270,7 +270,7 @@ dependencies = [
 
 [[package]]
 name = "neb-windhawk"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "neb-core",
  "serde",
@@ -282,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "neb-wm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "neb-core",
  "regex",
@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "neb-zapret"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "neb-core",
  "serde",

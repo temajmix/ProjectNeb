@@ -21,7 +21,10 @@ pub const COPIED_FILES: [(&str, &str); 14] = [
     ("neb-wallpaper.exe", "rust/target/release/neb-wallpaper.exe"),
     ("neb-updater.exe", "rust/target/release/neb-updater.exe"),
     ("neb-app.exe", "rust/target/release/neb-app.exe"),
-    ("WebView2Loader.dll", "rust/target/release/WebView2Loader.dll"),
+    (
+        "WebView2Loader.dll",
+        "rust/target/release/WebView2Loader.dll",
+    ),
     ("neb-zapret.exe", "rust/target/release/neb-zapret.exe"),
     ("neb-windhawk.exe", "rust/target/release/neb-windhawk.exe"),
     ("neb-discord.exe", "rust/target/release/neb-discord.exe"),

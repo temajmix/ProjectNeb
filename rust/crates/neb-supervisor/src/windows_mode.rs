@@ -153,11 +153,23 @@ impl Mode {
     /// The only correctness rule needed here is the one the state file exists for: when the config
     /// says the mode is off, anything still recorded as hidden is put back. A mode that is on is left
     /// alone, and a corrupt state file is reported rather than guessed at.
+    ///
+    /// Before either branch the records are reconciled with the live registry. After a crash the OS
+    /// may have put the taskbar back while the file still says `applied`, and restoring that stale
+    /// record would overwrite a value the user (or Windows) has already chosen. Reconciling drops
+    /// such a record without writing anything; only what is still hidden stays recorded.
     pub fn repair(&mut self) -> Vec<String> {
         let mut notes = Vec::new();
 
         if let Some(warning) = self.session.take_warning() {
             notes.push(warning);
+        }
+
+        for toggle in self.session.reconcile() {
+            notes.push(format!(
+                "{} was changed outside the supervisor, its record was dropped and the value left as it is",
+                toggle.id()
+            ));
         }
 
         if self.settings.enabled {
@@ -403,6 +415,86 @@ mod tests {
         );
         assert_eq!(repaired.applied_count(), 1);
         assert_eq!(registry.get(Toggle::Widgets), RawValue::Dword { value: 0 });
+    }
+
+    #[test]
+    fn the_repair_corrects_a_state_file_the_registry_has_already_restored() {
+        let (directory, registry, mut mode) = mode();
+        registry.set(Toggle::DesktopIcons, RawValue::Dword { value: 0 });
+        mode.apply(&update(json!({ "toggles": { "desktopIcons": true } })))
+            .expect("apply");
+        let writes = registry.writes();
+
+        // The user or Explorer showed the icons again after a crash; the file still says applied.
+        registry.set(Toggle::DesktopIcons, RawValue::Dword { value: 0 });
+
+        let mut off = mode.settings();
+        off.enabled = false;
+        let mut repaired = Mode::with_parts(
+            Session::new(
+                Arc::clone(&registry),
+                directory.path().join(neb_core::windows_mode::STATE_FILE),
+            ),
+            off,
+            None,
+        );
+
+        let notes = repaired.repair();
+
+        assert!(
+            notes.iter().any(
+                |note| note.contains("desktopIcons") && note.contains("outside the supervisor")
+            ),
+            "{notes:?}"
+        );
+        assert_eq!(repaired.applied_count(), 0, "the record is gone");
+        assert_eq!(
+            registry.writes(),
+            writes,
+            "a value the user already restored is never written again"
+        );
+        assert_eq!(
+            registry.get(Toggle::DesktopIcons),
+            RawValue::Dword { value: 0 }
+        );
+        assert!(
+            !directory
+                .path()
+                .join(neb_core::windows_mode::STATE_FILE)
+                .exists(),
+            "the state file now matches reality"
+        );
+    }
+
+    #[test]
+    fn the_repair_leaves_a_state_file_that_still_matches_the_registry_alone() {
+        let (directory, registry, mut mode) = mode();
+        mode.apply(&update(json!({ "toggles": { "taskView": true } })))
+            .expect("apply");
+        let writes = registry.writes();
+
+        let mut repaired = Mode::with_parts(
+            Session::new(
+                Arc::clone(&registry),
+                directory.path().join(neb_core::windows_mode::STATE_FILE),
+            ),
+            mode.settings(),
+            None,
+        );
+
+        let notes = repaired.repair();
+
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(repaired.applied_count(), 1);
+        assert_eq!(registry.writes(), writes, "nothing was written");
+        assert_eq!(registry.get(Toggle::TaskView), RawValue::Dword { value: 0 });
+        assert!(
+            directory
+                .path()
+                .join(neb_core::windows_mode::STATE_FILE)
+                .exists(),
+            "a matching state file is untouched"
+        );
     }
 
     #[test]
