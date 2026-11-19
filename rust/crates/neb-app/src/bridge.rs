@@ -438,6 +438,7 @@ fn dispatch_inner(context: &Context, job: &Job) -> Result<Value, MethodError> {
         "window.minimize" => window_message(context, crate::window::MINIMIZE),
         "window.close" => window_message(context, crate::window::CLOSE),
         "window.toggleMaximize" => window_message(context, crate::window::TOGGLE_MAXIMIZE),
+        "window.startDrag" => window_message(context, crate::window::START_DRAG),
         other => Err(format!("unknown method '{other}'")),
     }
 }

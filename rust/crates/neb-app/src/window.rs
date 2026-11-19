@@ -1,6 +1,7 @@
 //! The settings window: a plain framed Win32 window with a dark title bar.
 //!
-//! The window is deliberately a normal `WS_OVERLAPPEDWINDOW`: the dashboard is a web page, the
+//! The window is deliberately a frameless `WS_POPUP | WS_THICKFRAME`: the dashboard draws its own
+//! title bar inside the page, while the thick frame keeps the native resize borders.
 //! shell already owns the frameless surface, and a real frame gives the user resize borders,
 //! snap layouts and a system menu for free. The only cosmetic work is `DWMWA_USE_IMMERSIVE_DARK_MODE`
 //! so the caption matches the dark page instead of flashing white.
@@ -21,13 +22,15 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-    GetClientRect, GetMessageW, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, IsIconic, IsZoomed,
-    LoadCursorW, MINMAXINFO, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SPI_GETWORKAREA,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    SetForegroundWindow, SetWindowLongPtrW, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_MOVE,
-    WM_NCCREATE, WM_NCDESTROY, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    GetClientRect, GetMessageW, GetWindowLongPtrW, GetWindowRect, HTCAPTION, IDC_ARROW, IsIconic,
+    IsZoomed, LoadCursorW, MINMAXINFO, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
+    SPI_GETWORKAREA, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, SystemParametersInfoW,
+    TranslateMessage, WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
+    WM_MOVE, WM_NCCREATE, WM_NCDESTROY, WM_NCLBUTTONDOWN, WM_SIZE, WNDCLASSW, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows::core::PCWSTR;
 
 use crate::webview::WebView;
@@ -54,6 +57,8 @@ pub const MINIMIZE: u32 = WM_APP + 10;
 pub const CLOSE: u32 = WM_APP + 11;
 /// Message the bridge posts to toggle maximize, which the dashboard's title button uses.
 pub const TOGGLE_MAXIMIZE: u32 = WM_APP + 12;
+/// Message the bridge posts when the page's title bar is dragged: Windows starts the move loop.
+pub const START_DRAG: u32 = WM_APP + 14;
 /// Message carrying one bridge reply for the UI thread to post to the page.
 ///
 /// WebView2's controller is apartment-threaded (`PostWebMessageAsJson` from the worker fails with
@@ -338,7 +343,7 @@ pub fn create(settings: &WindowSettings, store: ConfigStore) -> Result<Window, W
             Default::default(),
             PCWSTR(class.as_ptr()),
             PCWSTR(title.as_ptr()),
-            WS_OVERLAPPEDWINDOW,
+            WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU,
             left,
             top,
             width,
@@ -658,6 +663,21 @@ unsafe extern "system" fn window_proc(
             // SAFETY: `hwnd` is live and the commands are documented constants.
             unsafe {
                 let _ = ShowWindow(hwnd, if maximized { SW_RESTORE } else { SW_MAXIMIZE });
+            }
+            LRESULT(0)
+        }
+        START_DRAG => {
+            // SAFETY: `hwnd` is live. Releasing the capture and posting a non-client left-button
+            // press is the documented way to enter the window's own move loop, which keeps
+            // dragging native (snap layouts, multi-monitor) without a custom hit-test.
+            unsafe {
+                let _ = ReleaseCapture();
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_NCLBUTTONDOWN,
+                    Some(WPARAM(usize::try_from(HTCAPTION).unwrap_or(2))),
+                    Some(LPARAM(0)),
+                );
             }
             LRESULT(0)
         }
