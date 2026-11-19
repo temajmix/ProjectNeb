@@ -2,6 +2,10 @@
 
 Все заметные изменения ProjectNeb. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 
+## [0.4.2] — 2026-11-19
+
+Okno bez sistemnoy polosy: zagolovok i knopki vnutri prilozheniya, peretaskivanie za shapku, dvoynoy klik razvorachivaet.
+
 ## [0.4.1] — 2026-11-19
 
 Одна шапка окна вместо двух. Супервизор подбирает уже запущенные панель и обои после перезапуска, сверяет режим замены Windows с реестром после сбоя, диалог Что нового больше не блокирует панель.

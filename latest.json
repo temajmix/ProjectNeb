@@ -1,17 +1,17 @@
 {
-  "version": "0.4.1",
+  "version": "0.4.2",
   "channel": "beta",
   "released": "2026-11-19",
-  "notes": "Одна шапка окна вместо двух. Супервизор подбирает уже запущенные панель и обои после перезапуска, сверяет режим замены Windows с реестром после сбоя, диалог Что нового больше не блокирует панель.",
+  "notes": "Okno bez sistemnoy polosy: zagolovok i knopki vnutri prilozheniya, peretaskivanie za shapku, dvoynoy klik razvorachivaet.",
   "changelogUrl": "https://github.com/temajmix/ProjectNeb/blob/main/CHANGELOG.md",
   "assets": {
     "portable": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.4.1/ProjectNeb-0.4.1-beta-portable.zip",
-      "sha256": "0232A71A2D9B61F1E68E71B243B5AD731E920BB2C8CB2BCF2B867F77C3AB2BA8"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.4.2/ProjectNeb-0.4.2-beta-portable.zip",
+      "sha256": "0169CF1228E5438F5234DD9274D3A170E88668A9811F6026ED8B75731A5DE33E"
     },
     "setup": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.4.1/ProjectNeb-0.4.1-beta-setup.exe",
-      "sha256": "124D9FF37A1B395FC40492C9073DB68073D321B7C8F03BAAFF971FD47692209C"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.4.2/ProjectNeb-0.4.2-beta-setup.exe",
+      "sha256": "45EF42F6B0986DC99400657DEB8103AE227FEDEF1F3C9891AC4784E4A28D067D"
     }
   }
 }
