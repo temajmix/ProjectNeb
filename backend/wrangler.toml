@@ -1,0 +1,36 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "projectneb-pro"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# Replace with the id printed by:
+#   wrangler d1 create projectneb-pro
+# This placeholder is intentionally not a real account/database id.
+[[d1_databases]]
+binding = "DB"
+database_name = "projectneb-pro"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[vars]
+ENVIRONMENT = "development"
+VERSION = "0.1.0"
+MAX_DEVICES = "3"
+RATE_LIMIT_PER_MINUTE = "30"
+LICENSE_TTL_SECONDS = "900"
+SESSION_TTL_SECONDS = "2592000"
+OAUTH_STATE_TTL_SECONDS = "600"
+# Public OAuth application id. Safe to keep in source; the deploy script can
+# override it as a secret so the checked-in value stays a placeholder.
+DISCORD_CLIENT_ID = "000000000000000000"
+DISCORD_REDIRECT_URI = "https://projectneb-pro.example.workers.dev/auth/discord/callback"
+
+# Secrets are never stored in this file. Set them with `wrangler secret put`
+# or backend/scripts/deploy.ps1 (reads them from the environment):
+#   DISCORD_CLIENT_ID        OAuth application id (public, but set per environment)
+#   DISCORD_CLIENT_SECRET    Discord OAuth client secret
+#   LICENSE_PRIVATE_KEY      Ed25519 private key (PKCS#8 base64 or JWK JSON)
+#   BOOSTY_WEBHOOK_SECRET    Shared HMAC secret for Boosty webhooks
+# Optional:
+#   DISCORD_REDIRECT_URI         https://<worker-host>/auth/discord/callback
+#   LICENSE_PREVIOUS_PUBLIC_KEY  old Ed25519 public key (SPKI/raw base64 or JWK JSON)

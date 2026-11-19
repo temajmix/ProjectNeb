@@ -422,3 +422,115 @@ fn dump_and_store_agree_on_the_same_file() {
 
     assert_eq!(stdout_json(&output), loaded);
 }
+
+/// The workspace manifest the `release` command rewrites.
+fn workspace_manifest() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml")
+}
+
+#[test]
+fn release_dry_run_prints_the_plan_and_writes_nothing() {
+    let (manifest, _) = isolated();
+    let cargo_toml = workspace_manifest();
+    let before = fs::read(&cargo_toml).expect("read the workspace manifest");
+    let manifest_arg = manifest.path().to_str().expect("a utf-8 temp path");
+
+    let output = run(
+        None,
+        &[
+            "release",
+            "--version",
+            "9.9.9",
+            "--notes",
+            "dry run",
+            "--dry-run",
+            "--manifest-repo",
+            manifest_arg,
+        ],
+    );
+    let plan = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "{}", stderr_text(&output));
+
+    for needle in [
+        "would write",
+        "cargo test --workspace",
+        "cargo build --workspace --release",
+        "would create zip",
+        "gh release create v9.9.9",
+        "latest.json",
+        "CHANGELOG.md",
+        "git -C",
+        "dry run complete",
+    ] {
+        assert!(
+            plan.contains(needle),
+            "the plan must mention {needle}:\n{plan}"
+        );
+    }
+
+    assert_eq!(
+        fs::read_dir(manifest.path())
+            .expect("read the manifest dir")
+            .count(),
+        0,
+        "a dry run must not write into the manifest repository"
+    );
+    assert_eq!(
+        fs::read(&cargo_toml).expect("read the workspace manifest"),
+        before,
+        "a dry run must not rewrite the workspace version"
+    );
+}
+
+#[test]
+fn release_refuses_a_version_that_is_not_greater() {
+    let (manifest, _) = isolated();
+
+    let output = run(
+        None,
+        &[
+            "release",
+            "--version",
+            "0.0.1",
+            "--notes",
+            "too old",
+            "--dry-run",
+            "--manifest-repo",
+            manifest.path().to_str().expect("a utf-8 temp path"),
+        ],
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        stderr_text(&output).contains("greater than the current workspace version"),
+        "{}",
+        stderr_text(&output)
+    );
+}
+
+#[test]
+fn release_rejects_a_malformed_version() {
+    let (manifest, _) = isolated();
+
+    let output = run(
+        None,
+        &[
+            "release",
+            "--version",
+            "1.2",
+            "--notes",
+            "bad",
+            "--dry-run",
+            "--manifest-repo",
+            manifest.path().to_str().expect("a utf-8 temp path"),
+        ],
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        stderr_text(&output).contains("MAJOR.MINOR.PATCH"),
+        "{}",
+        stderr_text(&output)
+    );
+}

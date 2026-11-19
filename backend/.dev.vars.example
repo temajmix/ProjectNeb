@@ -1,0 +1,25 @@
+# Copy to `.dev.vars` for local development. Never commit `.dev.vars`.
+# Names only in this example file; leave values empty here.
+
+# Ed25519 private signing key. Either PKCS#8 DER base64 or a full JWK JSON blob.
+# Generate one with:
+#   node -e "const {generateKeyPairSync}=require('crypto');console.log(generateKeyPairSync('ed25519').privateKey.export({format:'der',type:'pkcs8'}).toString('base64'))"
+LICENSE_PRIVATE_KEY=
+
+# Discord OAuth application (https://discord.com/developers/applications).
+# The client id may instead be set in wrangler.toml [vars].
+# The callback must be the Worker URL, for example:
+#   http://127.0.0.1:8787/auth/discord/callback   (wrangler dev)
+#   https://<worker-host>/auth/discord/callback    (deployed)
+# The `return` parameter sent by the desktop client is restricted to
+# http://127.0.0.1:<port>/callback and http://localhost:<port>/callback.
+DISCORD_CLIENT_ID=
+DISCORD_CLIENT_SECRET=
+DISCORD_REDIRECT_URI=
+
+# Boosty webhook shared secret (HMAC-SHA256 over the raw request body).
+BOOSTY_WEBHOOK_SECRET=
+
+# Optional: previous public key kept during a signing-key rotation.
+# Accepts SPKI DER base64, raw 32-byte base64, or JWK JSON.
+LICENSE_PREVIOUS_PUBLIC_KEY=

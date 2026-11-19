@@ -1,23 +1,22 @@
-//! Theme tokens for the bar, read from the same JSON files the C# shell reads.
+//! The bar's palette: [`neb_core::theme::ThemeTokens`] converted to Direct2D colours.
 //!
-//! The contract is `Neb.Core.Theming.ThemeStore`/`ThemeTokens`: `themes/<id>.json` with seven `#RRGGBB`
-//! colours, an id, a name and a corner radius. A file that is unreadable, unparsable or carries a
-//! colour in any other spelling is skipped with a warning — one bad theme must never cost the user the
-//! bar — and [`Theme::baked_in`] is always the fallback.
+//! The token model, the file search and every validation rule live in `neb-core`, because the
+//! settings window reads the same files; this module only maps validated RGB triples to
+//! [`D2D1_COLOR_F`] and applies the alphas the bar draws with.
 //!
-//! Two of the tokens are drawn at fixed alphas rather than as written: the bar overlays a translucent
-//! surface and hairline on top of the background, so `surface` and `stroke` only contribute their hue.
-//! That is what [`SURFACE_ALPHA`] and [`STROKE_ALPHA`] are for, and it is why a bright stroke in a
-//! user theme cannot paint a glaring line across the screen.
+//! Two tokens are drawn at a fixed alpha rather than as written: the bar overlays a translucent
+//! surface and hairline on top of the background, so `surface` and `stroke` only contribute their
+//! hue. That is what [`SURFACE_ALPHA`] and [`STROKE_ALPHA`] are for, and it is why a bright stroke in
+//! a user theme cannot paint a glaring line across the screen. `opacity` scales the background.
 
-use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
-use neb_core::config::DEFAULT_THEME_ID;
 use neb_core::logging::LogHandle;
+pub use neb_core::theme::ThemeError;
+use neb_core::theme::{Rgb, ThemeTokens};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
-/// Opacity of the bar background: the brief asks for the theme colour at 92 %.
+/// Opacity of the bar background when a theme does not name one: the brief asks for 92 %.
 pub const BACKGROUND_ALPHA: f32 = 0.92;
 
 /// Opacity of the raised surface fill.
@@ -27,19 +26,13 @@ pub const SURFACE_ALPHA: f32 = 0.08;
 pub const STROKE_ALPHA: f32 = 0.10;
 
 /// A palette the bar paints with, already converted to Direct2D colours.
-///
-/// All seven colour tokens are parsed and validated, because a theme file has to stay valid for the C#
-/// build that shares the folder. The bar itself draws four of them: [`background`](Self::background),
-/// [`stroke`](Self::stroke) as the bottom hairline, [`text`](Self::text) and
-/// [`text_dim`](Self::text_dim). `surface`, `accent` and `accent2` are carried for the settings window
-/// and the dock, which are later slices; nothing in this binary fills with them yet.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
     /// Stable id, i.e. the file name when the JSON omits it.
     pub id: String,
     /// Human-readable name.
     pub name: String,
-    /// Bar background, at [`BACKGROUND_ALPHA`].
+    /// Bar background, at the theme's `opacity` (92 % when unset).
     pub background: D2D1_COLOR_F,
     /// Raised fill, white at [`SURFACE_ALPHA`].
     pub surface: D2D1_COLOR_F,
@@ -53,224 +46,76 @@ pub struct Theme {
     pub accent: D2D1_COLOR_F,
     /// Secondary highlight, reserved for the parts of the shell that arrive later.
     pub accent2: D2D1_COLOR_F,
-    /// Corner radius in device-independent pixels.
+    /// Corner radius in device-independent pixels: the validated `radius` token.
     pub corner_radius: f32,
-}
-
-/// Why a theme file was not used.
-#[derive(Debug, thiserror::Error)]
-pub enum ThemeError {
-    /// The file could not be read.
-    #[error("cannot read '{}': {source}", path.display())]
-    Io {
-        /// File that was tried.
-        path: PathBuf,
-        /// The underlying error.
-        #[source]
-        source: std::io::Error,
-    },
-    /// The file is not the JSON object `ThemeStore` expects.
-    #[error("'{}' is not a theme document: {reason}", path.display())]
-    Shape {
-        /// File that was tried.
-        path: PathBuf,
-        /// What was wrong, in words a log line can carry.
-        reason: String,
-    },
+    /// Background opacity, `0.4..=1.0`.
+    pub opacity: f32,
+    /// Reserved: whether a future renderer blurs what is behind the bar.
+    pub blur: bool,
+    /// UI font family.
+    pub font: String,
+    /// Themed bar height, or `None` when the config's `barHeight` decides.
+    pub bar_height: Option<i32>,
+    /// Themed dock tile side in DIPs, or `None` for the shipped default.
+    pub dock_tile: Option<i32>,
 }
 
 impl Theme {
     /// The palette the C# build ships as `liquid-glass`, used when no file answers.
     pub fn baked_in() -> Self {
-        Self {
-            id: DEFAULT_THEME_ID.to_owned(),
-            name: "Liquid Glass".to_owned(),
-            background: with_alpha((0x0B, 0x0A, 0x12), BACKGROUND_ALPHA),
-            surface: with_alpha((0xFF, 0xFF, 0xFF), SURFACE_ALPHA),
-            stroke: with_alpha((0x2B, 0x25, 0x44), STROKE_ALPHA),
-            text: with_alpha((0xF6, 0xF4, 0xFF), 1.0),
-            text_dim: with_alpha((0xB7, 0xB3, 0xC9), 1.0),
-            accent: with_alpha((0xA7, 0x8B, 0xFA), 1.0),
-            accent2: with_alpha((0x7C, 0x5C, 0xFF), 1.0),
-            corner_radius: 14.0,
-        }
+        Self::from_tokens(ThemeTokens::baked_in())
     }
 
-    /// The theme called `id`, or the closest thing that exists.
-    ///
-    /// Lookup order: `%LocalAppData%\ProjectNeb\themes`, then a `themes` folder next to the executable
-    /// (where the packaged build ships them), then the baked-in palette. A broken file is logged and
-    /// stepped over, exactly like the C# store.
+    /// The theme called `id`, or the closest thing that exists: a broken file is logged and skipped.
     pub fn load(id: &str, log: Option<&LogHandle>) -> Self {
-        for dir in theme_dirs() {
-            let direct = dir.join(format!("{id}.json"));
-            if direct.is_file() {
-                match parse_file(&direct) {
-                    Ok(theme) => return theme,
-                    Err(error) => warn(log, &format!("{error}, skipped")),
-                }
-            }
-
-            if let Some(theme) = scan_for_id(&dir, id, log) {
-                return theme;
-            }
-        }
-
-        warn(
-            log,
-            &format!("no theme file answers for '{id}', using the baked-in palette"),
-        );
-        Self::baked_in()
-    }
-}
-
-/// Reports a skipped theme file when there is a log to report it to.
-fn warn(log: Option<&LogHandle>, message: &str) {
-    if let Some(log) = log {
-        log.warn("theme", message);
-    }
-}
-
-/// `%LocalAppData%\ProjectNeb\themes`, then `<exe>\themes`; whichever exists first wins.
-fn theme_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![neb_core::paths::themes_dir()];
-
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        dirs.push(parent.join("themes"));
+        Self::from_tokens(ThemeTokens::load(id, log))
     }
 
-    dirs.retain(|dir| dir.is_dir());
-    dirs
-}
+    /// Validates a theme document without touching a disk.
+    ///
+    /// # Errors
+    ///
+    /// The [`ThemeError`] the core parser reports.
+    pub fn parse(path: &Path, text: &str) -> Result<Self, ThemeError> {
+        ThemeTokens::parse(path, text).map(Self::from_tokens)
+    }
 
-/// Finds the file in `dir` whose `id` field is `id`, for a theme whose file name is not its id.
-fn scan_for_id(dir: &std::path::Path, id: &str, log: Option<&LogHandle>) -> Option<Theme> {
-    let entries = fs::read_dir(dir).ok()?;
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .collect();
-    files.sort();
-
-    for path in files {
-        match parse_file(&path) {
-            Ok(theme) if theme.id == id => return Some(theme),
-            Ok(_) => {}
-            Err(error) => warn(log, &format!("{error}, skipped")),
+    /// Maps a validated token set onto the colours Direct2D draws with.
+    pub fn from_tokens(tokens: ThemeTokens) -> Self {
+        Self {
+            id: tokens.id,
+            name: tokens.name,
+            background: with_alpha(tokens.background, tokens.opacity),
+            surface: with_alpha(Rgb::WHITE, SURFACE_ALPHA),
+            stroke: with_alpha(tokens.stroke, STROKE_ALPHA),
+            text: with_alpha(tokens.text, 1.0),
+            text_dim: with_alpha(tokens.text_dim, 1.0),
+            accent: with_alpha(tokens.accent, 1.0),
+            accent2: with_alpha(tokens.accent2, 1.0),
+            corner_radius: tokens.radius,
+            opacity: tokens.opacity,
+            blur: tokens.blur,
+            font: tokens.font,
+            bar_height: tokens.bar_height,
+            dock_tile: tokens.dock_tile,
         }
     }
-
-    None
-}
-
-/// Reads and validates one theme file.
-fn parse_file(path: &std::path::Path) -> Result<Theme, ThemeError> {
-    let text = fs::read_to_string(path).map_err(|source| ThemeError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-
-    parse(path, &text)
-}
-
-/// Validates a theme document. Split out so the tests can feed it text without touching a disk.
-fn parse(path: &std::path::Path, text: &str) -> Result<Theme, ThemeError> {
-    let document: serde_json::Value =
-        serde_json::from_str(text).map_err(|error| ThemeError::Shape {
-            path: path.to_path_buf(),
-            reason: error.to_string(),
-        })?;
-
-    let field = |name: &str| document.get(name).and_then(serde_json::Value::as_str);
-
-    // The C# store validates all seven colours; doing the same means a file this build accepts is a
-    // file the other build accepts too.
-    let background = colour(path, field("background"))?;
-    let surface = colour(path, field("surface"))?;
-    let stroke = colour(path, field("stroke"))?;
-    let text = colour(path, field("text"))?;
-    let text_dim = colour(path, field("textDim"))?;
-    let accent = colour(path, field("accent"))?;
-    let accent2 = colour(path, field("accent2"))?;
-
-    let id = field("id")
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .or_else(|| path.file_stem().and_then(|stem| stem.to_str()))
-        .ok_or_else(|| ThemeError::Shape {
-            path: path.to_path_buf(),
-            reason: "no usable id".to_owned(),
-        })?;
-
-    let corner_radius = document
-        .get("cornerRadius")
-        .and_then(serde_json::Value::as_f64)
-        .filter(|radius| radius.is_finite() && (0.0..=64.0).contains(radius))
-        .map_or(12.0, |radius| radius as f32);
-
-    Ok(Theme {
-        id: id.to_owned(),
-        name: field("name")
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .unwrap_or(id)
-            .to_owned(),
-        background: with_alpha(background, BACKGROUND_ALPHA),
-        surface: with_alpha(surface, SURFACE_ALPHA),
-        stroke: with_alpha(stroke, STROKE_ALPHA),
-        text: with_alpha(text, 1.0),
-        text_dim: with_alpha(text_dim, 1.0),
-        accent: with_alpha(accent, 1.0),
-        accent2: with_alpha(accent2, 1.0),
-        corner_radius,
-    })
-}
-
-/// Accepts exactly `#RRGGBB`, the only spelling both builds accept.
-fn colour(path: &std::path::Path, value: Option<&str>) -> Result<(u8, u8, u8), ThemeError> {
-    let Some(value) = value else {
-        return Err(ThemeError::Shape {
-            path: path.to_path_buf(),
-            reason: "a colour is missing".to_owned(),
-        });
-    };
-
-    let trimmed = value.trim();
-    let digits = trimmed
-        .strip_prefix('#')
-        .filter(|digits| digits.len() == 6 && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| ThemeError::Shape {
-            path: path.to_path_buf(),
-            reason: format!("'{value}' is not #RRGGBB"),
-        })?;
-
-    let channel = |at: usize| {
-        u8::from_str_radix(&digits[at..at + 2], 16).map_err(|error| ThemeError::Shape {
-            path: path.to_path_buf(),
-            reason: format!("'{value}' is not #RRGGBB: {error}"),
-        })
-    };
-
-    Ok((channel(0)?, channel(2)?, channel(4)?))
 }
 
 /// Applies an alpha to an 8-bit RGB triple.
-fn with_alpha((red, green, blue): (u8, u8, u8), alpha: f32) -> D2D1_COLOR_F {
+fn with_alpha(colour: Rgb, alpha: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
-        r: f32::from(red) / 255.0,
-        g: f32::from(green) / 255.0,
-        b: f32::from(blue) / 255.0,
-        a: alpha,
+        r: f32::from(colour.red) / 255.0,
+        g: f32::from(colour.green) / 255.0,
+        b: f32::from(colour.blue) / 255.0,
+        a: alpha.clamp(0.0, 1.0),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::PathBuf;
 
     fn path() -> PathBuf {
         PathBuf::from("graphite.json")
@@ -291,7 +136,7 @@ mod tests {
 
     #[test]
     fn a_shipped_theme_file_parses() {
-        let theme = parse(&path(), GRAPHITE).expect("graphite must parse");
+        let theme = Theme::parse(&path(), GRAPHITE).expect("graphite must parse");
 
         assert_eq!(theme.id, "graphite");
         assert_eq!(theme.name, "Graphite");
@@ -309,37 +154,45 @@ mod tests {
             .join("../../../src/Neb.App/themes/liquid-glass.json");
         let text = std::fs::read_to_string(&shipped).expect("the shipped theme must be readable");
 
-        let theme = parse(&shipped, &text).expect("liquid-glass must parse");
+        let theme = Theme::parse(&shipped, &text).expect("liquid-glass must parse");
 
-        assert_eq!(theme.id, DEFAULT_THEME_ID);
+        assert_eq!(theme.id, neb_core::config::DEFAULT_THEME_ID);
         assert_eq!(theme.name, "Liquid Glass");
     }
 
     #[test]
-    fn an_id_falls_back_to_the_file_name() {
-        let text = r##"{
-  "name": "Graphite",
-  "background": "#131416",
-  "surface": "#212327",
-  "stroke": "#303338",
-  "text": "#ECEEF0",
-  "textDim": "#9AA0A6",
-  "accent": "#D8DEE3",
-  "accent2": "#8A9299",
-  "cornerRadius": 8
-}"##;
+    fn the_opacity_token_sets_the_background_alpha() {
+        let text = GRAPHITE.replace(
+            "\"cornerRadius\": 8",
+            r#""cornerRadius": 8, "opacity": 0.7"#,
+        );
+        let theme = Theme::parse(&path(), &text).expect("parse");
 
-        let theme = parse(&path(), text).expect("a document without an id still parses");
+        assert!((theme.opacity - 0.7).abs() < 1e-6);
+        assert!((theme.background.a - 0.7).abs() < 1e-6);
+    }
 
-        assert_eq!(theme.id, "graphite");
-        assert_eq!(theme.name, "Graphite");
+    #[test]
+    fn the_v2_tokens_reach_the_shell_palette() {
+        let text = GRAPHITE.replace(
+            "\"cornerRadius\": 8",
+            r##""radius": 20, "blur": true, "font": "Cascadia Mono",
+                "barHeight": 48, "dockTile": 44"##,
+        );
+        let theme = Theme::parse(&path(), &text).expect("parse");
+
+        assert!((theme.corner_radius - 20.0).abs() < f32::EPSILON);
+        assert!(theme.blur);
+        assert_eq!(theme.font, "Cascadia Mono");
+        assert_eq!(theme.bar_height, Some(48));
+        assert_eq!(theme.dock_tile, Some(44));
     }
 
     #[test]
     fn a_colour_that_is_not_rrggbb_is_rejected() {
         for broken in ["#FFF", "0x131416", "#13141G", "", "rgb(1,2,3)"] {
             let text = GRAPHITE.replace("\"#131416\"", &format!("\"{broken}\""));
-            match parse(&path(), &text) {
+            match Theme::parse(&path(), &text) {
                 Err(ThemeError::Shape { reason, .. }) => {
                     assert!(reason.contains("RRGGBB"), "{broken}: {reason}");
                 }
@@ -353,14 +206,14 @@ mod tests {
         let text = GRAPHITE.replace("\"textDim\": \"#9AA0A6\",", "");
 
         assert!(matches!(
-            parse(&path(), &text),
+            Theme::parse(&path(), &text),
             Err(ThemeError::Shape { .. })
         ));
     }
 
     #[test]
     fn broken_json_is_rejected_with_the_parse_error() {
-        match parse(&path(), "{ nope") {
+        match Theme::parse(&path(), "{ nope") {
             Err(ThemeError::Shape { reason, .. }) => assert!(!reason.is_empty()),
             other => panic!("expected a shape error, got {other:?}"),
         }
@@ -373,7 +226,7 @@ mod tests {
                 "\"cornerRadius\": 8",
                 &format!("\"cornerRadius\": {radius}"),
             );
-            let theme = parse(&path(), &text).expect("parse");
+            let theme = Theme::parse(&path(), &text).expect("parse");
 
             assert!(
                 (theme.corner_radius - 12.0).abs() < f32::EPSILON,
@@ -390,5 +243,6 @@ mod tests {
         assert!((theme.background.r - 0x0B as f32 / 255.0).abs() < 1e-6);
         assert!((theme.accent.r - 0xA7 as f32 / 255.0).abs() < 1e-6);
         assert!((theme.corner_radius - 14.0).abs() < f32::EPSILON);
+        assert_eq!(theme.font, neb_core::theme::DEFAULT_FONT);
     }
 }

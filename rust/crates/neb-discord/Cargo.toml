@@ -1,0 +1,28 @@
+[package]
+name = "neb-discord"
+description = "ProjectNeb Discord Rich Presence: named-pipe IPC client, presets and foreground rules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "neb_discord"
+path = "src/lib.rs"
+
+[[bin]]
+name = "neb-discord"
+path = "src/main.rs"
+
+[dependencies]
+neb-core = { path = "../neb-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+windows = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

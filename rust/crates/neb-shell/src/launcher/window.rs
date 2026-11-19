@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use neb_core::config::AnimationSettings;
 use neb_core::strings::{Language, Text, get};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -36,16 +37,18 @@ use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindow
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, EN_CHANGE,
     ES_AUTOHSCROLL, GWLP_USERDATA, GetClientRect, GetForegroundWindow, GetParent,
-    GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId, HMENU, IDC_ARROW, LWA_ALPHA,
-    LoadCursorW, PostMessageW, RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SendMessageW,
-    SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_CTLCOLOREDIT, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_PRINTCLIENT, WM_SETFONT, WM_SIZE,
-    WNDCLASSW, WS_CHILD, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId, HMENU, IDC_ARROW, KillTimer,
+    LWA_ALPHA, LoadCursorW, PostMessageW, RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SendMessageW,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE,
+    WM_COMMAND, WM_CTLCOLOREDIT, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_PRINTCLIENT,
+    WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
 
+use crate::anim::{FRAME_MS, LAUNCHER_MS, LAUNCHER_SCALE_FROM, Transition, now_ms};
 use crate::geometry::{Monitor, Rect};
 use crate::render::{PaintOutcome, RenderError};
 use crate::theme::Theme;
@@ -77,6 +80,9 @@ pub const WM_LAUNCHER_QUERY: u32 = WM_APP + 9;
 /// How tall the query control's font is, in DIPs.
 const QUERY_FONT_DIP: f32 = 20.0;
 
+/// The 16 ms timer that runs only while the panel is fading in.
+const TIMER_REVEAL: usize = 31;
+
 /// What a launcher is created with; it travels through `CreateWindowExW` as the create parameter.
 #[derive(Debug, Clone)]
 pub struct LauncherSpec {
@@ -90,6 +96,8 @@ pub struct LauncherSpec {
     pub entries: Arc<Vec<Entry>>,
     /// Whether a build is in flight, which the empty state says out loud.
     pub building: bool,
+    /// The user's motion preferences.
+    pub animations: AnimationSettings,
 }
 
 /// Everything one launcher window owns.
@@ -126,6 +134,12 @@ struct LauncherState {
     busy: bool,
     /// How many frames this panel has drawn, which is the only proof a paint test can offer.
     frames: u64,
+    /// The user's motion preferences.
+    animations: AnimationSettings,
+    /// The panel's fade-and-grow reveal.
+    reveal: Transition,
+    /// Whether the 16 ms reveal timer is armed.
+    animating: bool,
 }
 
 impl LauncherState {
@@ -161,6 +175,9 @@ impl LauncherState {
             closing: false,
             busy: false,
             frames: 0,
+            animations: spec.animations,
+            reveal: Transition::settled(1.0),
+            animating: false,
         }
         .with_entries(spec.entries)
     }
@@ -191,9 +208,12 @@ impl LauncherState {
         self.create_edit();
 
         // SAFETY: every call takes this window, which exists, and plain values. The constant alpha is
-        // what turns the opaque surface into 96 % glass; the window style is already layered.
+        // what turns the opaque surface into 96 % glass; the window style is already layered. It
+        // starts at zero when the reveal runs, so the panel fades in instead of flashing.
+        self.reveal = Transition::scaled(now_ms(), 0.0, 1.0, LAUNCHER_MS, &self.animations);
+        let alpha = (GLASS_ALPHA as f32 * self.reveal.value(now_ms())).round() as u8;
         unsafe {
-            let _ = SetLayeredWindowAttributes(self.hwnd, COLORREF(0), GLASS_ALPHA, LWA_ALPHA);
+            let _ = SetLayeredWindowAttributes(self.hwnd, COLORREF(0), alpha, LWA_ALPHA);
         }
 
         self.recompute();
@@ -212,6 +232,7 @@ impl LauncherState {
         }
 
         self.paint();
+        self.arm_reveal();
 
         crate::log_info!(
             "launcher",
@@ -586,8 +607,19 @@ impl LauncherState {
 
     /// Draws one frame through the renderer, and counts it.
     fn paint(&mut self) {
+        let progress = self.reveal.value(now_ms());
+        let scale = LAUNCHER_SCALE_FROM + (1.0 - LAUNCHER_SCALE_FROM) * progress;
+
+        // SAFETY: `hwnd` is a live layered window of this process; the alpha is a plain value.
+        unsafe {
+            let alpha = (f32::from(GLASS_ALPHA) * progress)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+            let _ = SetLayeredWindowAttributes(self.hwnd, COLORREF(0), alpha, LWA_ALPHA);
+        }
+
         let outcome = match self.renderer.as_mut() {
-            Some(renderer) => renderer.paint(self.selection, self.top),
+            Some(renderer) => renderer.paint(self.selection, self.top, scale),
             None => PaintOutcome::Failed(RenderError::Unavailable(
                 "the launcher has no renderer".to_owned(),
             )),
@@ -599,12 +631,39 @@ impl LauncherState {
                 crate::log_info!("launcher", "the render target was lost, rebuilding");
                 self.recreate_renderer();
                 if let Some(renderer) = self.renderer.as_mut()
-                    && let PaintOutcome::Painted = renderer.paint(self.selection, self.top)
+                    && let PaintOutcome::Painted = renderer.paint(self.selection, self.top, scale)
                 {
                     self.frames += 1;
                 }
             }
             PaintOutcome::Failed(error) => crate::log_warn!("launcher", "paint: {error}"),
+        }
+    }
+
+    /// Arms the 16 ms reveal timer unless the panel is already settled.
+    fn arm_reveal(&mut self) {
+        if self.animating || self.reveal.is_done(now_ms()) {
+            return;
+        }
+
+        self.animating = true;
+        // SAFETY: `hwnd` is this window and the timer id is ours.
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_REVEAL, FRAME_MS, None);
+        }
+    }
+
+    /// One 16 ms frame of the reveal.
+    fn reveal_step(&mut self) {
+        let now = now_ms();
+        self.paint();
+
+        if self.reveal.is_done(now) {
+            self.animating = false;
+            // SAFETY: `hwnd` is this window and the id belongs to the reveal timer.
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_REVEAL);
+            }
         }
     }
 
@@ -853,6 +912,10 @@ unsafe extern "system" fn launcher_proc(
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
+            WM_TIMER if wparam.0 == TIMER_REVEAL => {
+                state.reveal_step();
+                LRESULT(0)
+            }
             WM_SIZE => {
                 state.resized();
                 LRESULT(0)

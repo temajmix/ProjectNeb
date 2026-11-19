@@ -1,7 +1,7 @@
 //! The memory soak harness.
 //!
-//! `neb-supervisor --soak <minutes> --interval <seconds>` starts the configured children, samples
-//! the working set of every `neb-*` process once per interval, appends the samples to
+//! `ProjectNeb --soak <minutes> --interval <seconds>` starts the configured children, samples
+//! the working set of every ProjectNeb process once per interval, appends the samples to
 //! `%LocalAppData%\ProjectNeb\logs\soak-<stamp>.csv` and prints a summary. `--soak-check` turns the
 //! run into a gate: a process that grew more than [`LIMIT_GROWTH`] over the run fails the command.
 //!
@@ -36,8 +36,11 @@ pub const LIMIT_GROWTH: f64 = 0.20;
 /// Bytes in a mebibyte, the unit the summary prints.
 const MIB: f64 = 1024.0 * 1024.0;
 
-/// Prefix every ProjectNeb process name shares.
+/// Prefix the component process names share.
 const PROCESS_PREFIX: &str = "neb-";
+
+/// Name of the single entry point, which is not `neb-*` but is still part of the soak.
+const ENTRY_EXE: &str = "ProjectNeb.exe";
 
 /// One reading of one process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,7 +422,8 @@ fn mib(bytes: u64) -> f64 {
 /// Whether `name` is one of the ProjectNeb executables.
 fn is_neb_process(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.starts_with(PROCESS_PREFIX) && lower.ends_with(".exe")
+    (lower.starts_with(PROCESS_PREFIX) && lower.ends_with(".exe"))
+        || lower == ENTRY_EXE.to_ascii_lowercase()
 }
 
 /// The executable name out of a process entry.
@@ -477,7 +481,7 @@ mod tests {
                 },
                 Sample {
                     pid: 8,
-                    name: "neb-supervisor.exe".to_owned(),
+                    name: "ProjectNeb.exe".to_owned(),
                     working_set: 10,
                 },
             ],
@@ -492,7 +496,7 @@ mod tests {
                 },
                 Sample {
                     pid: 8,
-                    name: "neb-supervisor.exe".to_owned(),
+                    name: "ProjectNeb.exe".to_owned(),
                     working_set: 9,
                 },
             ],
@@ -552,7 +556,12 @@ mod tests {
 
     #[test]
     fn only_projectneb_executables_are_sampled() {
-        for name in ["neb-shell.exe", "NEB-SUPERVISOR.EXE", "neb-wallpaper.exe"] {
+        for name in [
+            "neb-shell.exe",
+            "PROJECTNEB.EXE",
+            "ProjectNeb.exe",
+            "neb-wallpaper.exe",
+        ] {
             assert!(is_neb_process(name), "{name}");
         }
 

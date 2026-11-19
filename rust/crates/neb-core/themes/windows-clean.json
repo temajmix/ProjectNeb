@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "windows-clean",
+  "name": "Windows Clean",
+  "description": "Neutral grey and Windows blue, close to the stock Windows 11 chrome.",
+  "author": "ProjectNeb",
+  "tokens": {
+    "background": "#1F1F1F",
+    "surface": "#2B2B2B",
+    "stroke": "#3D3D3D",
+    "text": "#FFFFFF",
+    "textDim": "#C5C5C5",
+    "accent": "#0078D4",
+    "accent2": "#4CC2FF",
+    "radius": 8,
+    "opacity": 1.0,
+    "blur": false,
+    "font": "Segoe UI Variable Text",
+    "barHeight": 40,
+    "dockTile": 48
+  }
+}

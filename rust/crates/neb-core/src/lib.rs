@@ -8,8 +8,12 @@
 
 pub mod config;
 pub mod ipc;
+pub mod license;
 pub mod logging;
 pub mod metrics;
 pub mod paths;
 pub mod strings;
+pub mod theme;
+pub mod theming;
 pub mod time;
+pub mod windows_mode;

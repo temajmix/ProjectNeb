@@ -10,10 +10,10 @@ publish.workspace = true
 neb-core = { path = "../neb-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-windows = { workspace = true }
-
-[dev-dependencies]
+sha2 = "0.10"
 tempfile = { workspace = true }
+windows = { workspace = true }
+zip = { version = "7.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [lints]
 workspace = true

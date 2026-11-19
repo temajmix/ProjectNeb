@@ -68,6 +68,8 @@ pub enum Text {
     BarProfile,
     /// Name shown when no profile store gave the bar one.
     BarDefaultProfile,
+    /// Said by the media widget while nothing is playing.
+    BarMedia,
     /// Prefix of the dock's overflow tile and its tooltip: `Ещё 12`.
     DockMore,
     /// Placeholder in the launcher's search box.
@@ -108,13 +110,14 @@ pub enum Text {
 
 impl Text {
     /// Every key, so a test can walk the whole table.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::BarCpu,
         Self::BarRam,
         Self::BarLauncher,
         Self::BarSettings,
         Self::BarProfile,
         Self::BarDefaultProfile,
+        Self::BarMedia,
         Self::DockMore,
         Self::LauncherSearch,
         Self::LauncherEmpty,
@@ -146,6 +149,7 @@ const TABLE: [[&str; Text::ALL.len()]; Language::ALL.len()] = [
         "Параметры",
         "Профиль",
         "Основной",
+        "Ничего не играет",
         "Ещё",
         "Поиск приложений",
         "Ничего не найдено",
@@ -173,6 +177,7 @@ const TABLE: [[&str; Text::ALL.len()]; Language::ALL.len()] = [
         "Settings",
         "Profile",
         "Main",
+        "Nothing playing",
         "More",
         "Search apps",
         "Nothing found",

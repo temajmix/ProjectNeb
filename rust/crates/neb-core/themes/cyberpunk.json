@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "cyberpunk",
+  "name": "Cyberpunk",
+  "description": "Magenta and cyan on pure black, built for neon nights.",
+  "author": "ProjectNeb",
+  "tokens": {
+    "background": "#000000",
+    "surface": "#14001E",
+    "stroke": "#3A0A4A",
+    "text": "#E8F7FF",
+    "textDim": "#8F86A8",
+    "accent": "#FF2FB9",
+    "accent2": "#00F0FF",
+    "radius": 4,
+    "opacity": 0.97,
+    "blur": false,
+    "font": "Cascadia Mono",
+    "barHeight": 42,
+    "dockTile": 52
+  }
+}

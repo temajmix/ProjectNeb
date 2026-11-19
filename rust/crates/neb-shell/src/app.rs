@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use neb_core::config::{Config, ConfigStore, ShellSettings};
+use neb_core::config::{AnimationSettings, Config, ConfigStore, ShellSettings};
 use neb_core::ipc::ServerHandle;
 use neb_core::logging::{self, LogHandle};
 use neb_core::strings::Language;
@@ -17,6 +17,7 @@ use windows::Win32::UI::HiDpi::{
 };
 
 use crate::appbar::Edge;
+use crate::bar::{self, WidgetSpec};
 use crate::dock;
 use crate::geometry::Monitor;
 use crate::ipc::{self, Shared};
@@ -210,6 +211,10 @@ struct App {
     /// The window the launcher took the foreground from, so Esc can give it back.
     launcher_previous: isize,
     hotkey: Option<&'static str>,
+    /// The bar's widget list, parsed once per configuration reload.
+    widgets: Vec<WidgetSpec>,
+    /// The user's motion preferences.
+    animations: AnimationSettings,
 }
 
 impl App {
@@ -225,6 +230,7 @@ impl App {
         let theme = Theme::load(config.shell.theme(), crate::log());
         let visible = config.shell.bar_enabled;
         let pinned = dock::catalog::load(&config);
+        let (widgets, animations) = (parse_widgets(&config), config.animations);
 
         let control = window::create_controller()?;
         let hotkey = launcher::window::register_hotkey(control);
@@ -256,6 +262,8 @@ impl App {
             launcher_index: launcher::index::Cache::new(),
             launcher_previous: 0,
             hotkey,
+            widgets,
+            animations,
         };
 
         if app.visible {
@@ -367,14 +375,19 @@ impl App {
         self.theme = Theme::load(self.config.shell.theme(), crate::log());
         self.visible = self.config.shell.bar_enabled;
         self.pinned = dock::catalog::load(&self.config);
+        self.widgets = parse_widgets(&self.config);
+        self.animations = self.config.animations;
 
         crate::log_info!(
             "shell",
-            "reloaded: theme '{}', language '{}', visible {}, {} pinned app(s)",
+            "reloaded: theme '{}', language '{}', visible {}, {} pinned app(s), {} widget(s), animations {} at {:.2}x",
             self.theme.id,
             self.language.tag(),
             self.visible,
-            self.pinned.len()
+            self.pinned.len(),
+            self.widgets.len(),
+            if self.animations.enabled { "on" } else { "off" },
+            self.animations.speed()
         );
 
         self.relayout();
@@ -407,6 +420,10 @@ impl App {
 
     /// Builds one bar for `monitor`.
     fn create_bar(&self, monitor: &Monitor, shell: &ShellSettings) -> Result<HWND, WindowError> {
+        // A theme may name its own height; the configuration's value is the fallback, and the theme
+        // range is already validated by `neb-core`.
+        let height_dip = self.theme.bar_height.unwrap_or_else(|| shell.height());
+
         window::create_bar(BarSpec {
             monitor: monitor.clone(),
             edge: if shell.is_bottom() {
@@ -414,10 +431,12 @@ impl App {
             } else {
                 Edge::Top
             },
-            height_dip: shell.height(),
+            height_dip,
             theme: self.theme.clone(),
             language: self.language,
             profile: shell.profile_name.clone(),
+            widgets: self.widgets.clone(),
+            animations: self.animations,
             host: crate::appbar::windows(),
         })
     }
@@ -510,6 +529,8 @@ impl App {
             language: self.language,
             items,
             auto_hide: self.config.shell.dock_auto_hide,
+            tile_dip: self.theme.dock_tile.unwrap_or(dock::layout::TILE_DIP),
+            animations: self.animations,
             host: dock::window::windows(),
         };
 
@@ -596,6 +617,7 @@ impl App {
             language: self.language,
             entries: snapshot.entries,
             building: snapshot.building,
+            animations: self.animations,
         };
 
         match launcher::window::create_launcher(spec) {
@@ -668,6 +690,26 @@ impl App {
 
         crate::log_info!("shell", "stopped");
     }
+}
+
+/// Parses the widget list and reports every entry that was left out, once per configuration load.
+fn parse_widgets(config: &Config) -> Vec<WidgetSpec> {
+    let (widgets, skipped) = bar::parse(&config.shell.bar.widgets);
+
+    for kind in &skipped.unknown {
+        crate::log_warn!("bar", "unknown widget type '{kind}', skipped");
+    }
+
+    if skipped.overflow > 0 {
+        crate::log_warn!(
+            "bar",
+            "{} widget(s) over the limit of {}, skipped",
+            skipped.overflow,
+            bar::widgets::MAX_WIDGETS
+        );
+    }
+
+    widgets
 }
 
 /// The monitor the origin is on, which is where the dock goes.

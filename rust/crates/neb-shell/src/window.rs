@@ -21,27 +21,34 @@ use std::cell::Cell;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, OnceLock};
 
+use neb_core::config::AnimationSettings;
 use neb_core::strings::Language;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-    GetClientRect, GetMessageW, GetWindowLongPtrW, HTCLIENT, IsWindowVisible, KillTimer, MSG,
-    PostMessageW, RegisterClassW, RegisterWindowMessageW, SW_HIDE, SW_SHOWNOACTIVATE, SendMessageW,
-    SetTimer, SetWindowLongPtrW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE,
-    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_NCCREATE,
-    WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    GetClientRect, GetMessageW, GetWindowLongPtrW, HTCLIENT, IDC_ARROW, IsWindowVisible, KillTimer,
+    LoadCursorW, MSG, PostMessageW, RegisterClassW, RegisterWindowMessageW, SW_HIDE,
+    SW_SHOWNOACTIVATE, SendMessageW, SetTimer, SetWindowLongPtrW, ShowWindow, TranslateMessage,
+    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_HOTKEY, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_PAINT,
+    WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::PCWSTR;
 
+use crate::anim::{BAR_SLIDE_MS, FRAME_MS, HOVER_MS, Transition, now_ms};
 use crate::appbar::{self, Edge, EdgeHost};
+use crate::bar::ClockReading;
+use crate::bar::widgets::{WidgetSpec, WidgetText};
 use crate::geometry::{Monitor, Rect};
-use crate::render::{Layouts, PaintOutcome, RenderError, Renderer, TWO_LINE_MIN_HEIGHT};
+use crate::render::{Hit, Hover, Layouts, PaintOutcome, RenderError, Renderer};
 use crate::theme::Theme;
+use crate::widgets::metrics::Reading;
 use crate::widgets::{BarText, ClockText, MetricsText};
 
 /// Class name of a bar window.
@@ -63,6 +70,7 @@ pub const WM_VISIBILITY: u32 = WM_APP + 4;
 const TIMER_CLOCK: usize = 1;
 const TIMER_REBUILD: usize = 2;
 const TIMER_REPORT: usize = 3;
+const TIMER_ANIM: usize = 4;
 
 /// How long two display changes have to be apart before the bars are rebuilt.
 pub const REBUILD_DEBOUNCE_MS: u32 = 500;
@@ -306,6 +314,10 @@ pub struct BarSpec {
     pub language: Language,
     /// The profile name, or `None` for the localised default.
     pub profile: Option<String>,
+    /// The widgets the bar draws, in configuration order.
+    pub widgets: Vec<WidgetSpec>,
+    /// The user's motion preferences.
+    pub animations: AnimationSettings,
     /// Where the AppBar calls go; the shell itself, or a counter in a test.
     pub host: Arc<dyn EdgeHost>,
 }
@@ -333,6 +345,28 @@ struct BarState {
     text: BarText,
     clock: ClockText,
     metrics: MetricsText,
+    /// The widgets this bar draws, parsed from the configuration once when it was created.
+    widgets: Vec<WidgetSpec>,
+    /// One composed text per widget, rewritten when the clock or a sample changes.
+    texts: Vec<WidgetText>,
+    /// The wall clock the formatters read.
+    clock_reading: ClockReading,
+    /// The last metrics sample, kept so a metrics widget can show one half or both.
+    reading: Reading,
+    /// The user's motion preferences.
+    animations: AnimationSettings,
+    /// The bar sliding into place; already settled when animations are off.
+    slide: Transition,
+    /// Whether the window has already been placed at the end of the slide.
+    slide_at_rest: bool,
+    /// The launcher glyph's hover fade.
+    hover_launcher: Transition,
+    /// The settings glyph's hover fade.
+    hover_settings: Transition,
+    /// What the pointer is over, if a glyph.
+    hover: Option<Hit>,
+    /// Whether the 16 ms animation timer is armed.
+    animating: bool,
     renderer: Option<Renderer>,
     layouts: Option<Layouts>,
     host: Arc<dyn EdgeHost>,
@@ -346,6 +380,9 @@ struct BarState {
 
 impl BarState {
     fn new(hwnd: HWND, spec: BarSpec) -> Self {
+        let reading = Reading::default();
+        let animations = spec.animations;
+
         Self {
             hwnd,
             monitor: spec.monitor,
@@ -356,6 +393,17 @@ impl BarState {
             text: BarText::new(spec.profile.as_deref(), spec.language),
             clock: ClockText::default(),
             metrics: MetricsText::default(),
+            widgets: spec.widgets,
+            texts: Vec::new(),
+            clock_reading: ClockReading::default(),
+            reading,
+            animations,
+            slide: Transition::settled(1.0),
+            slide_at_rest: true,
+            hover_launcher: Transition::settled(0.0),
+            hover_settings: Transition::settled(0.0),
+            hover: None,
+            animating: false,
             renderer: None,
             layouts: None,
             host: spec.host,
@@ -389,18 +437,20 @@ impl BarState {
         self.renderer = Some(renderer);
 
         // The two-line clock needs a tall enough bar; the date is hidden in a short one.
+        self.clock_reading = current_reading();
         let _ = self.clock.update(&mut self.text, self.language);
+        self.rebuild_widget_texts();
         self.rebuild_layouts();
 
         if let Some(layouts) = self.layouts.as_ref() {
             let (width, height) = self.size_dip();
-            let (clock, date) = layouts.heights();
             crate::log_info!(
                 "bar",
-                "{}: laid out {width:.0}x{height:.0} dip, clock '{clock:.1}', date '{date:.1}' ({})",
+                "{}: laid out {width:.0}x{height:.0} dip, {} widget(s), {}",
                 self.monitor.device,
+                layouts.widget_count(),
                 if layouts.show_date() {
-                    "two lines"
+                    "date shown"
                 } else {
                     "one line"
                 }
@@ -408,6 +458,7 @@ impl BarState {
         }
 
         self.reserve();
+        self.begin_slide();
         Ok(())
     }
 
@@ -472,18 +523,46 @@ impl BarState {
     /// the metrics only when a new reading differs, and a resize always.
     fn rebuild_layouts(&mut self) {
         let size = self.size_dip();
-        let show_date = size.1 >= TWO_LINE_MIN_HEIGHT;
 
-        match Layouts::build(&self.text, show_date, size) {
+        match Layouts::build(&self.texts, &self.widgets, &self.theme, size) {
             Ok(layouts) => self.layouts = Some(layouts),
             Err(error) => crate::log_warn!("bar", "layout: {error}"),
         }
     }
 
+    /// Rewrites every widget's text from the current clock, sample and configuration.
+    fn rebuild_widget_texts(&mut self) {
+        let mut texts = Vec::with_capacity(self.widgets.len());
+
+        for spec in &self.widgets {
+            // A clock leaves the date to a `date` widget in its own group instead of drawing it twice.
+            let date_is_separate = spec.kind == crate::bar::WidgetKind::Clock
+                && self.widgets.iter().any(|other| {
+                    other.kind == crate::bar::WidgetKind::Date
+                        && other.show_date
+                        && other.align == spec.align
+                });
+
+            let mut text = WidgetText::default();
+            text.compose(
+                spec,
+                &self.clock_reading,
+                self.reading,
+                &self.text.profile,
+                self.language,
+                date_is_separate,
+            );
+            texts.push(text);
+        }
+
+        self.texts = texts;
+    }
+
     /// Draws the frame Windows asked for.
     fn paint(&mut self) {
+        let hover = self.hover_state(now_ms());
         let outcome = match (self.renderer.as_mut(), self.layouts.as_ref()) {
-            (Some(renderer), Some(layouts)) => renderer.paint(&self.theme, layouts),
+            (Some(renderer), Some(layouts)) => renderer.paint(&self.theme, layouts, hover),
             _ => return,
         };
 
@@ -503,7 +582,10 @@ impl BarState {
 
     /// The clock tick.
     fn tick(&mut self) {
+        self.clock_reading = current_reading();
+
         if self.clock.update(&mut self.text, self.language) {
+            self.rebuild_widget_texts();
             self.rebuild_layouts();
             self.invalidate();
         }
@@ -512,11 +594,192 @@ impl BarState {
     /// A metrics sample.
     fn apply_metrics(&mut self, cpu: u32, ram: u32) {
         let reading = crate::widgets::metrics::Reading::from_packed(cpu, ram);
+        self.reading = reading;
 
-        if self.metrics.update(&mut self.text, reading, self.language) {
+        let changed = self.metrics.update(&mut self.text, reading, self.language);
+        if changed {
+            self.rebuild_widget_texts();
             self.rebuild_layouts();
             self.invalidate();
         }
+    }
+
+    /// Starts the 220 ms slide from just outside the bar's edge.
+    fn begin_slide(&mut self) {
+        let now = now_ms();
+        self.slide = Transition::scaled(now, 0.0, 1.0, BAR_SLIDE_MS, &self.animations);
+        self.slide_at_rest = false;
+        self.apply_slide(now);
+
+        if self.slide.is_done(now) {
+            self.slide_at_rest = true;
+        }
+
+        self.arm_animation();
+    }
+
+    /// Moves the window to where the slide currently wants it.
+    fn apply_slide(&mut self, now: u64) {
+        let progress = self.slide.value(now);
+        let strip = self.strip();
+
+        if progress >= 1.0 {
+            self.host.place(self.hwnd, strip, self.topmost());
+            return;
+        }
+
+        let offset = ((1.0 - progress) * strip.height() as f32).round() as i32;
+        let rect = match self.edge {
+            Edge::Top => Rect::new(
+                strip.left,
+                strip.top - offset,
+                strip.right,
+                strip.bottom - offset,
+            ),
+            Edge::Bottom => Rect::new(
+                strip.left,
+                strip.top + offset,
+                strip.right,
+                strip.bottom + offset,
+            ),
+        };
+
+        self.host.place(self.hwnd, rect, self.topmost());
+    }
+
+    /// Arms the 16 ms animation timer if it is not already running.
+    fn arm_animation(&mut self) {
+        if self.animating || !self.is_animating(now_ms()) {
+            return;
+        }
+
+        self.animating = true;
+        // SAFETY: `hwnd` is this window and the timer id is ours. `SetTimer` replaces an armed timer
+        // rather than adding one, so re-arming is harmless.
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_ANIM, FRAME_MS, None);
+        }
+    }
+
+    /// One 16 ms animation frame: move the bar, or repaint a fading glyph; stop when idle.
+    fn animation_step(&mut self) {
+        let now = now_ms();
+
+        if !self.slide_at_rest {
+            // The final tick lands on the strip exactly, which is why this runs even when the
+            // transition is already done.
+            self.apply_slide(now);
+            self.slide_at_rest = self.slide.is_done(now);
+        }
+
+        if self.slide_at_rest
+            && self.hover_launcher.is_done(now)
+            && self.hover_settings.is_done(now)
+        {
+            self.stop_animation();
+            self.invalidate();
+            return;
+        }
+
+        self.invalidate();
+    }
+
+    /// Kills the animation timer; the next transition arms it again.
+    fn stop_animation(&mut self) {
+        if !self.animating {
+            return;
+        }
+
+        self.animating = false;
+        // SAFETY: `hwnd` is this window and the id belongs to the animation timer.
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
+        }
+    }
+
+    /// Whether anything is moving or fading.
+    fn is_animating(&self, now: u64) -> bool {
+        !self.slide.is_done(now)
+            || !self.hover_launcher.is_done(now)
+            || !self.hover_settings.is_done(now)
+    }
+
+    /// The fade values the painter uses for this frame.
+    fn hover_state(&self, now: u64) -> Hover {
+        Hover {
+            launcher: self.hover_launcher.value(now),
+            settings: self.hover_settings.value(now),
+        }
+    }
+
+    /// A pointer sample, in client pixels: fades the glyph under it in or out.
+    fn pointer_moved(&mut self, x: i32, y: i32) {
+        let scale = 96.0 / self.dpi() as f32;
+        let (x, y) = (x as f32 * scale, y as f32 * scale);
+
+        let hit = self
+            .layouts
+            .as_ref()
+            .and_then(|layouts| layouts.hit_test(x, y));
+        if hit == self.hover {
+            return;
+        }
+
+        self.hover = hit;
+        let now = now_ms();
+        let launcher = f32::from(u8::from(hit == Some(Hit::Launcher)));
+        let settings = f32::from(u8::from(hit == Some(Hit::Settings)));
+
+        if (self.hover_launcher.target() - launcher).abs() > f32::EPSILON {
+            self.hover_launcher = Transition::scaled(
+                now,
+                self.hover_launcher.value(now),
+                launcher,
+                HOVER_MS,
+                &self.animations,
+            );
+        }
+
+        if (self.hover_settings.target() - settings).abs() > f32::EPSILON {
+            self.hover_settings = Transition::scaled(
+                now,
+                self.hover_settings.value(now),
+                settings,
+                HOVER_MS,
+                &self.animations,
+            );
+        }
+
+        self.arm_animation();
+        self.invalidate();
+    }
+
+    /// The pointer left the bar: fade every glyph out.
+    fn pointer_left(&mut self) {
+        if self.hover.is_none()
+            && self.hover_launcher.target() == 0.0
+            && self.hover_settings.target() == 0.0
+        {
+            return;
+        }
+
+        self.hover = None;
+        let now = now_ms();
+        self.hover_launcher = Transition::scaled(
+            now,
+            self.hover_launcher.value(now),
+            0.0,
+            HOVER_MS,
+            &self.animations,
+        );
+        self.hover_settings = Transition::scaled(
+            now,
+            self.hover_settings.value(now),
+            0.0,
+            HOVER_MS,
+            &self.animations,
+        );
+        self.arm_animation();
     }
 
     /// Re-measures after the window changed size; also the second half of a DPI change.
@@ -822,6 +1085,43 @@ unsafe extern "system" fn bar_proc(
                 SetTimer(Some(hwnd), TIMER_CLOCK, millis_to_next_second(), None);
                 LRESULT(0)
             }
+            WM_TIMER if wparam.0 == TIMER_ANIM => {
+                state.animation_step();
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE => {
+                let (x, y) = mouse_position(lparam);
+                state.pointer_moved(x, y);
+
+                let mut track = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                // SAFETY: `track` is live and names this window, so Windows will send `WM_MOUSELEAVE`.
+                let _ = TrackMouseEvent(&mut track);
+                LRESULT(0)
+            }
+            WM_MOUSELEAVE => {
+                state.pointer_left();
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                let (x, y) = mouse_position(lparam);
+                let scale = 96.0 / state.dpi() as f32;
+                let hit = state
+                    .layouts
+                    .as_ref()
+                    .and_then(|layouts| layouts.hit_test(x as f32 * scale, y as f32 * scale));
+
+                if hit == Some(Hit::Launcher) {
+                    // Recorded, not executed: opening the panel creates a window, which the loop does
+                    // with nothing else borrowed.
+                    set_pending(|pending| pending.set_launcher_open());
+                }
+                LRESULT(0)
+            }
             WM_METRICS => {
                 state.apply_metrics(wparam.0 as u32, lparam.0 as u32);
                 LRESULT(0)
@@ -877,6 +1177,29 @@ pub fn millis_to_next_second() -> u32 {
     } else {
         1_000
     }
+}
+
+/// The wall clock a widget formatter reads.
+fn current_reading() -> ClockReading {
+    // SAFETY: `GetLocalTime` fills in the structure it returns and takes no pointer from the caller.
+    let now = unsafe { GetLocalTime() };
+
+    ClockReading {
+        hour: now.wHour,
+        minute: now.wMinute,
+        second: now.wSecond,
+        day_of_week: now.wDayOfWeek,
+        day: now.wDay,
+        month: now.wMonth,
+    }
+}
+
+/// The client coordinates of a mouse message.
+fn mouse_position(lparam: LPARAM) -> (i32, i32) {
+    let x = (lparam.0 & 0xFFFF) as u16 as i16;
+    let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16;
+
+    (i32::from(x), i32::from(y))
 }
 
 /// The controller window procedure: no drawing, only routing.
@@ -975,11 +1298,14 @@ fn register_class(
             lpfnWndProc: Some(proc),
             hInstance: instance(),
             lpszClassName: PCWSTR(name.as_ptr()),
+            hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default(),
             ..WNDCLASSW::default()
         };
 
         // SAFETY: `window_class` is fully initialised and the class name it points at outlives the
-        // call; a null background brush and no cursor keep the bar from flashing or grabbing one.
+        // call; a null background brush keeps the bar from flashing. The class cursor is the plain
+        // arrow: without one Windows leaves whatever cursor was current, and a stale "app starting"
+        // spinner over the bar looks like the shell itself is busy.
         unsafe { RegisterClassW(&window_class) != 0 }
     });
 
@@ -1113,6 +1439,14 @@ pub fn repaint_now(hwnd: HWND) {
 pub fn painted_frames(hwnd: HWND) -> u64 {
     // SAFETY: `hwnd` is a live bar window of this process, created on this thread.
     unsafe { StateGuard::enter(hwnd) }.map_or(0, |state| state.frames)
+}
+
+/// Whether a bar is still sliding or fading, i.e. whether its 16 ms timer is armed.
+///
+/// The idle test uses this: once it answers `false`, a second without input must not paint.
+pub fn is_animating(hwnd: HWND) -> bool {
+    // SAFETY: `hwnd` is a live bar window of this process, created on this thread.
+    unsafe { StateGuard::enter(hwnd) }.is_some_and(|state| state.is_animating(now_ms()))
 }
 
 /// The pixel size of the render target behind `hwnd`, or `None` when it has no renderer yet.
@@ -1331,6 +1665,8 @@ mod tests {
                 theme: Theme::baked_in(),
                 language: Language::En,
                 profile: None,
+                widgets: Vec::new(),
+                animations: AnimationSettings::default(),
                 host: Arc::clone(&host) as Arc<dyn EdgeHost>,
             },
         );
@@ -1373,6 +1709,8 @@ mod tests {
                 theme: Theme::baked_in(),
                 language: Language::En,
                 profile: None,
+                widgets: Vec::new(),
+                animations: AnimationSettings::default(),
                 host: Arc::clone(&host) as Arc<dyn EdgeHost>,
             },
         );
@@ -1397,6 +1735,8 @@ mod tests {
                 theme: Theme::baked_in(),
                 language: Language::En,
                 profile: None,
+                widgets: Vec::new(),
+                animations: AnimationSettings::default(),
                 host: Arc::clone(&host) as Arc<dyn EdgeHost>,
             },
         );

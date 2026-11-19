@@ -13,9 +13,10 @@
 //! 3. a taskbar a crashed shell left hidden is put back before anything new starts;
 //! 4. a stop the supervisor asked for is not a crash and starts nothing.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use neb_core::ipc::{self, Request, Response, ServerHandle};
@@ -25,7 +26,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::children::{Child, ChildSpec, Enabled, NamedMutex};
+use crate::settings;
 use crate::taskbar_repair::{self, Outcome};
+use crate::tray::Tray;
+use crate::update::{self, UpdatesHandle};
+use crate::windows_mode::Mode;
 
 /// Pipe the supervisor answers on.
 pub const PIPE: &str = "ProjectNeb.supervisor";
@@ -42,17 +47,32 @@ pub const MODULE: &str = "supervisor";
 /// How often the loop reaps children and applies queued commands.
 pub const TICK: Duration = Duration::from_millis(250);
 
-/// Executable name of the bar, looked up next to `neb-supervisor.exe`.
+/// Executable name of the bar, looked up next to `ProjectNeb.exe`.
 const SHELL_EXE: &str = "neb-shell.exe";
 
-/// Executable name of the living wallpaper, looked up next to `neb-supervisor.exe`.
+/// Executable name of the living wallpaper, looked up next to `ProjectNeb.exe`.
 const WALLPAPER_EXE: &str = "neb-wallpaper.exe";
+
+/// Executable name of the Discord Rich Presence process, looked up next to `ProjectNeb.exe`.
+const DISCORD_EXE: &str = "neb-discord.exe";
+/// The tiling window manager, started only when `windowManager.enabled` is on.
+const WM_EXE: &str = "neb-wm.exe";
+/// The DPI-bypass manager, started only when `zapret.enabled` is on.
+const ZAPRET_EXE: &str = "neb-zapret.exe";
+/// The Windhawk integration, started only when `windhawk.enabled` is on.
+const WINDHAWK_EXE: &str = "neb-windhawk.exe";
 
 /// How long the supervisor waits for a shell to answer `shell.ping` at startup.
 const SHELL_PROBE: Duration = Duration::from_secs(1);
 
+/// How long `app.restartChild` waits for a restart to be applied before answering anyway.
+///
+/// The dashboard asks for a restart and cannot tell a slow start from a failed one, so the answer
+/// is due after the same three seconds the plan promises, not after the child's own start timeout.
+pub const RESTART_BUDGET: Duration = Duration::from_secs(3);
+
 /// Everything the command line can change about a run.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Options {
     /// Shell executable, when it is not the `neb-shell.exe` next to this one.
     pub shell: Option<PathBuf>,
@@ -62,10 +82,29 @@ pub struct Options {
     pub command: Option<(PathBuf, Vec<String>)>,
     /// Echo every transition to stdout as well as the log.
     pub echo: bool,
+    /// Create the notification icon.
+    pub tray: bool,
+    /// Check the update manifest.
+    pub updates: bool,
     /// Pipe name; [`PIPE`] unless a test wants its own.
     pub pipe: String,
     /// Instance mutex name; [`INSTANCE_MUTEX`] unless a test wants its own.
     pub instance: String,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            shell: None,
+            wallpaper: None,
+            command: None,
+            echo: false,
+            tray: true,
+            updates: true,
+            pipe: String::new(),
+            instance: String::new(),
+        }
+    }
 }
 
 /// Why the supervisor could not start at all.
@@ -104,6 +143,10 @@ pub struct StateDoc {
     pub shell: ChildState,
     /// The living wallpaper.
     pub wallpaper: ChildState,
+    /// This supervisor's own process id, so a dashboard can measure it.
+    pub pid: u32,
+    /// Every child this supervisor owns, by the name `supervisor.restart` uses.
+    pub children: BTreeMap<String, ChildState>,
     /// Seconds since the supervisor started.
     pub uptime_s: u64,
 }
@@ -113,28 +156,71 @@ pub struct StateDoc {
 pub struct Shared {
     state: Mutex<StateDoc>,
     restarts: Mutex<Vec<String>>,
+    /// How many restarts the loop has applied per child, and the signal `app.restartChild` waits on.
+    restarts_applied: Mutex<BTreeMap<String, u64>>,
+    restart_signal: Condvar,
     stop: AtomicBool,
+    open_settings: AtomicBool,
     started: Instant,
     names: Vec<String>,
+    windows: Mutex<Mode>,
 }
 
 impl Shared {
-    /// A shared view over the children called `names`.
+    /// A shared view over the children called `names`, with the replacement mode detached.
+    ///
+    /// Only the tests build this shape; production always supplies a real [`Mode`].
+    #[cfg(test)]
     pub fn new(names: Vec<String>) -> Self {
+        Self::with_mode(names, Mode::detached())
+    }
+
+    /// A shared view whose Windows replacement mode is `windows`.
+    pub fn with_mode(names: Vec<String>, windows: Mode) -> Self {
         Self {
-            state: Mutex::new(StateDoc::default()),
+            state: Mutex::new(StateDoc {
+                pid: std::process::id(),
+                ..StateDoc::default()
+            }),
             restarts: Mutex::new(Vec::new()),
+            restarts_applied: Mutex::new(BTreeMap::new()),
+            restart_signal: Condvar::new(),
             stop: AtomicBool::new(false),
+            open_settings: AtomicBool::new(false),
             started: Instant::now(),
             names,
+            windows: Mutex::new(windows),
         }
     }
 
-    /// Replaces the published state.
+    /// Replaces the published state, deriving `shell`/`wallpaper` from `children`.
+    pub fn publish_children(&self, children: BTreeMap<String, ChildState>) {
+        let mut state = self.lock_state();
+        state.shell = children.get("shell").cloned().unwrap_or_default();
+        state.wallpaper = children.get("wallpaper").cloned().unwrap_or_default();
+        state.children = children;
+    }
+
+    /// Replaces the bar and wallpaper halves, leaving the other children as they were.
+    ///
+    /// Only the tests build a state without a supervisor loop; production always publishes every
+    /// child at once through [`publish_children`](Self::publish_children).
+    #[cfg(test)]
     pub fn publish(&self, shell: ChildState, wallpaper: ChildState) {
         let mut state = self.lock_state();
-        state.shell = shell;
-        state.wallpaper = wallpaper;
+        state.shell = shell.clone();
+        state.wallpaper = wallpaper.clone();
+        state.children.insert("shell".to_owned(), shell);
+        state.children.insert("wallpaper".to_owned(), wallpaper);
+    }
+
+    /// The published state of the child called `name`.
+    pub fn child_state(&self, name: &str) -> ChildState {
+        self.lock_state()
+            .children
+            .get(name)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The current state, with the uptime filled in.
@@ -154,9 +240,63 @@ impl Shared {
         std::mem::take(&mut self.lock_restarts())
     }
 
+    /// Queues a restart of `name` and waits until the loop has applied it, or `timeout` passes.
+    ///
+    /// Returns whether the loop applied it. The wait is on a counter the loop bumps after it has
+    /// stopped the old process and tried to start the new one, so a caller never mistakes the
+    /// pre-restart state for the result.
+    pub fn restart_and_wait(&self, name: &str, timeout: Duration) -> bool {
+        let seen = self.restarts_applied(name);
+        self.request_restart(name);
+
+        let deadline = Instant::now() + timeout;
+        let mut applied = self.lock_restarts_applied();
+
+        loop {
+            if applied.get(name).copied().unwrap_or(0) > seen {
+                return true;
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+
+            let (guard, _) = self
+                .restart_signal
+                .wait_timeout(applied, deadline - now)
+                .unwrap_or_else(|poison| poison.into_inner());
+            applied = guard;
+        }
+    }
+
+    /// Records that the loop has applied a restart of `name`, waking any waiter.
+    pub fn mark_restarted(&self, name: &str) {
+        *self
+            .lock_restarts_applied()
+            .entry(name.to_owned())
+            .or_insert(0) += 1;
+        self.restart_signal.notify_all();
+    }
+
+    /// How many restarts of `name` the loop has applied so far.
+    fn restarts_applied(&self, name: &str) -> u64 {
+        self.lock_restarts_applied().get(name).copied().unwrap_or(0)
+    }
+
     /// Asks the loop to stop.
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Queues an `app.openSettings`: the loop launches or focuses the window on its next tick.
+    pub fn request_open_settings(&self) {
+        self.open_settings.store(true, Ordering::SeqCst);
+    }
+
+    /// Takes the queued settings request, if any.
+    pub fn take_open_settings(&self) -> bool {
+        self.open_settings.swap(false, Ordering::SeqCst)
     }
 
     /// Whether a stop was asked for.
@@ -169,6 +309,43 @@ impl Shared {
         self.names.iter().any(|known| known == name)
     }
 
+    /// The document `windows.getState` answers with.
+    pub fn windows_state(&self) -> Value {
+        self.lock_windows().state_doc()
+    }
+
+    /// Applies one `windows.set` request and answers with the new state.
+    pub fn windows_set(&self, params: Option<&Value>) -> Result<Value, String> {
+        let update =
+            neb_core::windows_mode::Update::parse(params).map_err(|error| error.to_string())?;
+        let mut mode = self.lock_windows();
+        mode.apply(&update)?;
+
+        Ok(mode.state_doc())
+    }
+
+    /// Restores everything the mode changed; `true` when there was something to restore.
+    pub fn restore_windows(&self) -> Result<bool, String> {
+        let mut mode = self.lock_windows();
+        let applied = mode.has_applied();
+        mode.restore_all()?;
+
+        Ok(applied)
+    }
+
+    /// Whether any Windows chrome is currently hidden, which the tests read.
+    #[cfg(test)]
+    pub fn windows_applied(&self) -> bool {
+        self.lock_windows().has_applied()
+    }
+
+    /// The Windows replacement mode lock, poisoned or not.
+    fn lock_windows(&self) -> std::sync::MutexGuard<'_, Mode> {
+        self.windows
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
     /// The state lock, poisoned or not: a panic in a handler must not stop the supervisor.
     fn lock_state(&self) -> std::sync::MutexGuard<'_, StateDoc> {
         self.state
@@ -179,6 +356,13 @@ impl Shared {
     /// The restart queue lock, poisoned or not.
     fn lock_restarts(&self) -> std::sync::MutexGuard<'_, Vec<String>> {
         self.restarts
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// The applied-restart counter lock, poisoned or not.
+    fn lock_restarts_applied(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, u64>> {
+        self.restarts_applied
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
     }
@@ -208,6 +392,50 @@ pub fn dispatch(shared: &Shared, request: Request) -> Response {
             shared.request_stop();
             Response::success(id, json!({ "stopping": true }))
         }
+        // The window focuses itself when it is already open, so the answer is the same either way.
+        "app.openSettings" => {
+            shared.request_open_settings();
+            Response::success(id, json!({ "ok": true }))
+        }
+        // Stops the named child and starts it again; the answer is due once it runs, or after
+        // [`RESTART_BUDGET`] whichever comes first, so a dashboard button never hangs on it.
+        "app.restartChild" => match restarted_child(shared, &request) {
+            Some(name) => {
+                let name = name.to_owned();
+                let applied = shared.restart_and_wait(&name, RESTART_BUDGET);
+                let state = shared.child_state(&name);
+
+                Response::success(
+                    id,
+                    json!({
+                        "name": name,
+                        "running": state.running,
+                        "pid": state.pid,
+                        "applied": applied,
+                    }),
+                )
+            }
+            None => Response::failure(
+                id,
+                format!(
+                    "'app.restartChild' needs one of: {}",
+                    shared.names.join(", ")
+                ),
+            ),
+        },
+        "app.quit" => {
+            shared.request_stop();
+            Response::success(id, json!({ "ok": true }))
+        }
+        "windows.getState" => Response::success(id, shared.windows_state()),
+        "windows.set" => match shared.windows_set(request.params.as_ref()) {
+            Ok(state) => Response::success(id, state),
+            Err(reason) => Response::failure(id, format!("'windows.set' failed: {reason}")),
+        },
+        "windows.restore" => match shared.restore_windows() {
+            Ok(_) => Response::success(id, shared.windows_state()),
+            Err(reason) => Response::failure(id, format!("'windows.restore' failed: {reason}")),
+        },
         other => Response::failure(id, format!("unknown method '{other}'")),
     }
 }
@@ -229,7 +457,7 @@ fn restarted_child<'a>(shared: &Shared, request: &'a Request) -> Option<&'a str>
 }
 
 /// Writes every transition to the log, and to stdout when the run is a diagnostic one.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Reporter {
     log: Option<LogHandle>,
     echo: bool,
@@ -285,6 +513,12 @@ pub struct Supervisor {
     server: Option<ServerHandle>,
     children: Vec<Child>,
     started: Instant,
+    /// Data root, used by the tray and the updater when it exists.
+    root: PathBuf,
+    /// Notification icon, absent when the command line or Windows refuses one.
+    tray: Option<Tray>,
+    /// Update checker worker, absent when updates are disabled.
+    updates: Option<UpdatesHandle>,
     /// Held for the whole run: dropping it is what lets the next supervisor start.
     _instance: NamedMutex,
 }
@@ -315,7 +549,21 @@ impl Supervisor {
 
         let specs = specs(&options);
         let names: Vec<String> = specs.iter().map(|spec| spec.name.clone()).collect();
-        let shared = Arc::new(Shared::new(names));
+        let root = neb_core::paths::try_root().unwrap_or_default();
+
+        // Repair before anything starts: a state file left behind by an off mode is put back now.
+        let mut windows = if root.as_os_str().is_empty() {
+            reporter.warn("windows-mode: no ProjectNeb data directory, the mode is disabled");
+            Mode::detached()
+        } else {
+            Mode::open(&root, reporter.clone())
+        };
+        let repair_notes = windows.repair();
+        let shared = Arc::new(Shared::with_mode(names, windows));
+
+        for note in repair_notes {
+            reporter.info(&format!("windows-mode: {note}"));
+        }
 
         let mut supervisor = Self {
             reporter,
@@ -323,6 +571,9 @@ impl Supervisor {
             server: None,
             children: Vec::new(),
             started: Instant::now(),
+            root,
+            tray: None,
+            updates: None,
             _instance: instance,
         };
 
@@ -350,7 +601,7 @@ impl Supervisor {
         let pipe = if options.pipe.trim().is_empty() {
             PIPE.to_owned()
         } else {
-            options.pipe
+            options.pipe.clone()
         };
         let server = {
             let shared = Arc::clone(&supervisor.shared);
@@ -369,6 +620,8 @@ impl Supervisor {
         ));
 
         supervisor.publish();
+        supervisor.start_tray_and_updates(&options);
+        supervisor.show_whats_new();
 
         Ok(Some(supervisor))
     }
@@ -378,8 +631,21 @@ impl Supervisor {
         self.shared.stopping()
     }
 
+    /// Opens the main window after the children are up.
+    pub fn open_settings(&self) {
+        settings::launch(&self.reporter);
+    }
+
     /// Reaps dead children, starts the ones that are due and applies queued commands.
     pub fn tick(&mut self) {
+        if let Some(tray) = &self.tray {
+            tray.pump();
+        }
+
+        if self.shared.take_open_settings() {
+            settings::launch(&self.reporter);
+        }
+
         let now = Instant::now();
 
         for name in self.shared.take_restarts() {
@@ -444,8 +710,125 @@ impl Supervisor {
         }
     }
 
+    /// Starts the tray icon and the update worker, each only when the run asks for it.
+    fn start_tray_and_updates(&mut self, options: &Options) {
+        let shared = Arc::clone(&self.shared);
+        let stop: update::StopFn = Arc::new(move || shared.request_stop());
+        let directory = exe_dir();
+
+        if options.tray {
+            let reporter = self.reporter.clone();
+            let open_settings: crate::tray::OpenFn = Arc::new(move || settings::open(&reporter));
+
+            match Tray::new(
+                &directory,
+                self.root.clone(),
+                self.reporter.clone(),
+                Arc::clone(&stop),
+                open_settings,
+            ) {
+                Ok(mut tray) => {
+                    let shared = Arc::clone(&self.shared);
+                    let restore: crate::tray::RestoreFn =
+                        Arc::new(move || shared.restore_windows());
+                    tray.set_restore(restore);
+                    self.tray = Some(tray);
+                }
+                Err(error) => self.reporter.warn(&format!("tray: {error}")),
+            }
+        } else {
+            self.reporter.info("tray: disabled by the command line");
+        }
+
+        if !options.updates {
+            self.reporter.info("updates: disabled by the command line");
+            return;
+        }
+
+        if self.root.as_os_str().is_empty() {
+            self.reporter
+                .warn("updates: no ProjectNeb data directory, checks disabled");
+            return;
+        }
+
+        let settings = update::Settings::from_file(&self.root.join("config.json"));
+        if !settings.enabled {
+            self.reporter.info("updates: disabled by settings");
+            return;
+        }
+
+        let notify: update::Notify = match &self.tray {
+            Some(tray) => {
+                let notifier = tray.notifier();
+                Arc::new(move |title: &str, body: &str| {
+                    let _ = notifier.balloon(title, body);
+                })
+            }
+            None => Arc::new(|_title: &str, _body: &str| {}),
+        };
+
+        let handle = update::start(
+            settings.clone(),
+            self.root.clone(),
+            directory,
+            self.reporter.clone(),
+            notify,
+            stop,
+        );
+
+        if let Some(tray) = self.tray.as_mut() {
+            tray.set_updates(Some(handle.sender()));
+        }
+        self.updates = Some(handle);
+        self.reporter.info(&format!(
+            "updates: worker started (first check in {} s, then every {} h)",
+            update::FIRST_CHECK_DELAY.as_secs(),
+            settings.check_hours
+        ));
+    }
+
+    /// Shows the notes of the version that is running, once.
+    fn show_whats_new(&self) {
+        let Some(notes) = update::read_whats_new(&self.root) else {
+            return;
+        };
+
+        if notes.shown || notes.version != env!("CARGO_PKG_VERSION") {
+            return;
+        }
+
+        let shown = match &self.tray {
+            Some(tray) => tray.show_whats_new(&notes, true),
+            None => {
+                let shown = crate::tray::show_whats_new_dialog(None, &notes);
+                if shown {
+                    if let Err(error) = update::mark_shown(&self.root) {
+                        self.reporter.warn(&format!(
+                            "whats-new: cannot mark the notes as shown: {error}"
+                        ));
+                    }
+                }
+                shown
+            }
+        };
+
+        if shown {
+            self.reporter
+                .info(&format!("whats-new: showed the notes of {}", notes.version));
+        }
+    }
+
     /// Stops every child and closes the pipe.
     pub fn shutdown(&mut self) {
+        // The window is not a supervised child; leaving it behind would keep a WebView2 tree
+        // alive after "Exit" and block an updater from replacing `neb-app.exe`.
+        crate::settings::close_window();
+
+        if let Some(mut updates) = self.updates.take() {
+            updates.stop();
+            self.reporter.info("updates: worker stopped");
+        }
+
         for index in 0..self.children.len() {
             let name = self.children[index].name().to_owned();
             if let Some(pid) = self.children[index].stop() {
@@ -459,6 +842,10 @@ impl Supervisor {
             let pipe = server.pipe_name().to_owned();
             server.shutdown();
             self.reporter.info(&format!("ipc '{pipe}' closed"));
+        }
+
+        if self.tray.take().is_some() {
+            self.reporter.info("tray: closed");
         }
 
         self.reporter.info(&format!(
@@ -500,24 +887,30 @@ impl Supervisor {
 
         self.children[index].reset_backoff();
         self.start_child(index);
+
+        // Publish before the bump: the waiter in `app.restartChild` reads this document as soon as
+        // it is woken, and a state from before the restart would name the process that just died.
+        self.publish();
+        self.shared.mark_restarted(name);
     }
 
     /// Publishes what the IPC handlers answer from.
     fn publish(&self) {
-        let shell = self.child_state("shell");
-        let wallpaper = self.child_state("wallpaper");
-        self.shared.publish(shell, wallpaper);
-    }
-
-    /// The published state of the child called `name`.
-    fn child_state(&self, name: &str) -> ChildState {
-        self.children
+        let children = self
+            .children
             .iter()
-            .find(|child| child.name() == name)
-            .map_or_else(ChildState::default, |child| ChildState {
-                pid: child.pid(),
-                running: child.running(),
+            .map(|child| {
+                (
+                    child.name().to_owned(),
+                    ChildState {
+                        pid: child.pid(),
+                        running: child.running(),
+                    },
+                )
             })
+            .collect::<BTreeMap<_, _>>();
+
+        self.shared.publish_children(children);
     }
 
     /// Puts the taskbar back before anything starts, when a crashed shell left it hidden.
@@ -588,19 +981,32 @@ fn specs(options: &Options) -> Vec<ChildSpec> {
         .wallpaper
         .clone()
         .unwrap_or_else(|| sibling(WALLPAPER_EXE));
+    let discord = sibling(DISCORD_EXE);
+    let wm = sibling(WM_EXE);
+    let zapret = sibling(ZAPRET_EXE);
+    let windhawk = sibling(WINDHAWK_EXE);
 
     vec![
         ChildSpec::new("shell", shell, enabled.shell),
         ChildSpec::new("wallpaper", wallpaper, enabled.wallpaper),
+        ChildSpec::new("discord", discord, enabled.discord),
+        ChildSpec::new("wm", wm, enabled.wm),
+        ChildSpec::new("zapret", zapret, enabled.zapret),
+        ChildSpec::new("windhawk", windhawk, enabled.windhawk),
     ]
 }
 
 /// `name` next to the running executable, which is where `cargo build` puts every binary.
 fn sibling(name: &str) -> PathBuf {
+    exe_dir().join(name)
+}
+
+/// Directory of the running executable; the portable folder, in a real installation.
+fn exe_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .map_or_else(|| PathBuf::from(name), |directory| directory.join(name))
+        .unwrap_or_default()
 }
 
 /// Seconds with one decimal, for log lines.
@@ -611,6 +1017,8 @@ fn seconds(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use neb_core::windows_mode::{MemoryRegistry, RawValue, Session, Toggle, WindowsModeSettings};
+    use std::sync::Arc;
 
     fn shared() -> Shared {
         Shared::new(vec!["shell".to_owned(), "wallpaper".to_owned()])
@@ -650,6 +1058,9 @@ mod tests {
         assert_eq!(value["shell"]["running"], json!(true));
         assert_eq!(value["wallpaper"]["pid"], Value::Null);
         assert_eq!(value["wallpaper"]["running"], json!(false));
+        assert_eq!(value["pid"], json!(std::process::id()));
+        assert_eq!(value["children"]["shell"]["pid"], json!(42));
+        assert_eq!(value["children"]["wallpaper"]["running"], json!(false));
         assert!(value["uptimeS"].as_u64().is_some(), "{value}");
         assert!(
             value.get("uptime_s").is_none(),
@@ -712,6 +1123,85 @@ mod tests {
     }
 
     #[test]
+    fn app_restart_child_of_an_unknown_child_is_refused_with_the_list() {
+        let shared = shared();
+
+        let response = dispatch(
+            &shared,
+            request("app.restartChild", Some(json!({ "name": "nope" }))),
+        );
+
+        assert!(!response.ok, "{response:?}");
+        let message = response.error.expect("an explanation");
+        assert!(message.contains("shell"), "{message}");
+        assert!(message.contains("wallpaper"), "{message}");
+        assert!(
+            shared.take_restarts().is_empty(),
+            "a refused restart must not be queued"
+        );
+    }
+
+    #[test]
+    fn app_restart_child_answers_running_once_the_loop_applied_it() {
+        let shared = Arc::new(shared());
+        let loop_side = Arc::clone(&shared);
+
+        let stub = std::thread::spawn(move || {
+            for _ in 0..600 {
+                if loop_side.take_restarts().iter().any(|name| name == "shell") {
+                    let mut children = BTreeMap::new();
+                    children.insert(
+                        "shell".to_owned(),
+                        ChildState {
+                            pid: Some(7001),
+                            running: true,
+                        },
+                    );
+                    loop_side.publish_children(children);
+                    loop_side.mark_restarted("shell");
+                    return;
+                }
+
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        let started = Instant::now();
+        let response = dispatch(
+            &shared,
+            request("app.restartChild", Some(json!({ "name": "shell" }))),
+        );
+        let elapsed = started.elapsed();
+        stub.join().expect("the stub loop must not panic");
+
+        assert!(response.ok, "{response:?}");
+        let value = response.result.expect("a restart document");
+        assert_eq!(value["name"], json!("shell"));
+        assert_eq!(value["running"], json!(true));
+        assert_eq!(value["pid"], json!(7001));
+        assert_eq!(value["applied"], json!(true));
+        assert!(
+            elapsed < RESTART_BUDGET,
+            "the answer is due as soon as the child runs, not after the whole budget: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_restart_the_loop_never_applies_gives_up_at_its_deadline() {
+        let shared = shared();
+        let started = Instant::now();
+
+        let applied = shared.restart_and_wait("shell", Duration::from_millis(60));
+
+        assert!(!applied);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the wait must honour the timeout it was given"
+        );
+        assert_eq!(shared.take_restarts(), vec!["shell".to_owned()]);
+    }
+
+    #[test]
     fn stop_sets_the_flag_and_answers() {
         let shared = shared();
         assert!(!shared.stopping());
@@ -721,6 +1211,33 @@ mod tests {
         assert!(response.ok);
         assert_eq!(response.result, Some(json!({ "stopping": true })));
         assert!(shared.stopping(), "the loop must see the request");
+    }
+
+    #[test]
+    fn app_open_settings_queues_the_spawn_and_answers_ok() {
+        let shared = shared();
+
+        let response = dispatch(&shared, request("app.openSettings", None));
+
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.result, Some(json!({ "ok": true })));
+        assert!(shared.take_open_settings(), "the loop must see the request");
+        assert!(
+            !shared.take_open_settings(),
+            "one request opens the window once"
+        );
+    }
+
+    #[test]
+    fn app_quit_stops_the_children_and_answers_ok() {
+        let shared = shared();
+        assert!(!shared.stopping());
+
+        let response = dispatch(&shared, request("app.quit", None));
+
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.result, Some(json!({ "ok": true })));
+        assert!(shared.stopping(), "the loop must stop");
     }
 
     #[test]
@@ -741,14 +1258,27 @@ mod tests {
     fn the_default_children_are_the_shell_next_to_this_binary_and_the_wallpaper() {
         let specs = specs(&Options::default());
 
-        assert_eq!(specs.len(), 2);
+        assert_eq!(specs.len(), 6);
         assert_eq!(specs[0].name, "shell");
         assert!(specs[0].exe.ends_with(SHELL_EXE));
         assert_eq!(specs[1].name, "wallpaper");
         assert!(specs[1].exe.ends_with(WALLPAPER_EXE));
+        assert_eq!(specs[2].name, "discord");
+        assert!(specs[2].exe.ends_with(DISCORD_EXE));
+        assert_eq!(specs[3].name, "wm");
+        assert!(specs[3].exe.ends_with(WM_EXE));
+        assert_eq!(specs[4].name, "zapret");
+        assert!(specs[4].exe.ends_with(ZAPRET_EXE));
+        assert_eq!(specs[5].name, "windhawk");
+        assert!(specs[5].exe.ends_with(WINDHAWK_EXE));
+        assert!(!specs[5].enabled, "Windhawk is opt-in");
         assert!(
             specs[0].enabled,
             "the shipped config has no shell section, so the shell runs"
+        );
+        assert!(
+            !specs[2].enabled,
+            "the shipped config leaves Discord off until an app id exists"
         );
     }
 
@@ -785,6 +1315,8 @@ mod tests {
                 vec!["/c".to_owned(), "timeout".to_owned(), "30".to_owned()],
             )),
             echo: false,
+            tray: false,
+            updates: false,
             pipe: pipe.clone(),
             instance: format!(r"Local\ProjectNeb.supervisor.test.{tag}"),
             ..Options::default()
@@ -826,5 +1358,188 @@ mod tests {
             ipc::call(&pipe, "supervisor.ping", None, Duration::from_millis(500)).is_err(),
             "the pipe is gone after a shutdown"
         );
+    }
+
+    /// A shared supervisor with a windows mode over an in-memory registry and a temp config.
+    fn shared_with_mode() -> (tempfile::TempDir, Arc<MemoryRegistry>, Shared) {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let registry = Arc::new(MemoryRegistry::default());
+        let session = Session::new(
+            Arc::clone(&registry),
+            directory.path().join(neb_core::windows_mode::STATE_FILE),
+        );
+        let mode = Mode::with_parts(
+            session,
+            WindowsModeSettings::default(),
+            Some(directory.path().join("config.json")),
+        );
+
+        let shared = Shared::with_mode(vec!["shell".to_owned(), "wallpaper".to_owned()], mode);
+
+        (directory, registry, shared)
+    }
+
+    #[test]
+    fn windows_get_state_starts_off_with_nothing_applied() {
+        let (_directory, _registry, shared) = shared_with_mode();
+
+        let response = dispatch(&shared, request("windows.getState", None));
+        let state = response.result.expect("a state document");
+
+        assert!(response.ok);
+        assert_eq!(state["enabled"], json!(false));
+        for toggle in Toggle::ALL {
+            assert_eq!(state["toggles"][toggle.id()], json!(false));
+            assert_eq!(state["applied"][toggle.id()], json!(false));
+        }
+    }
+
+    #[test]
+    fn windows_set_applies_and_partial_updates_merge() {
+        let (directory, registry, shared) = shared_with_mode();
+
+        let first = dispatch(
+            &shared,
+            request(
+                "windows.set",
+                Some(json!({ "toggles": { "desktopIcons": true } })),
+            ),
+        );
+        assert!(first.ok, "{first:?}");
+
+        let second = dispatch(
+            &shared,
+            request(
+                "windows.set",
+                Some(json!({ "toggles": { "searchBox": true } })),
+            ),
+        );
+        assert!(second.ok, "{second:?}");
+        assert_eq!(
+            second.result.as_ref().expect("state")["applied"]["desktopIcons"],
+            json!(true),
+            "the first toggle is still applied by a partial update"
+        );
+
+        let state = dispatch(&shared, request("windows.getState", None))
+            .result
+            .expect("state");
+        assert_eq!(state["enabled"], json!(true));
+        assert_eq!(state["toggles"]["desktopIcons"], json!(true));
+        assert_eq!(state["toggles"]["searchBox"], json!(true));
+        assert_eq!(state["applied"]["desktopIcons"], json!(true));
+        assert_eq!(state["applied"]["searchBox"], json!(true));
+        assert_eq!(
+            registry.get(Toggle::DesktopIcons),
+            RawValue::Dword { value: 1 }
+        );
+        assert_eq!(
+            registry.get(Toggle::SearchBox),
+            RawValue::Dword { value: 0 }
+        );
+
+        let config: Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("config.json")).expect("config written"),
+        )
+        .expect("valid json");
+        assert_eq!(config["windowsMode"]["desktopIcons"], json!(true));
+        assert_eq!(config["windowsMode"]["searchBox"], json!(true));
+    }
+
+    #[test]
+    fn windows_set_rejects_an_unknown_key_and_leaves_the_registry_alone() {
+        let (_directory, registry, shared) = shared_with_mode();
+
+        for params in [
+            json!({ "toggles": { "telemetry": true } }),
+            json!({ "telemetry": true }),
+            json!({ "enabled": "yes" }),
+        ] {
+            let response = dispatch(&shared, request("windows.set", Some(params.clone())));
+            assert!(!response.ok, "{params} must be refused");
+            assert!(
+                response
+                    .error
+                    .as_deref()
+                    .is_some_and(|message| message.contains("telemetry")
+                        || message.contains("true or false")),
+                "{params}: {response:?}"
+            );
+        }
+
+        assert_eq!(registry.writes(), 0);
+        assert!(!shared.windows_applied());
+    }
+
+    #[test]
+    fn windows_set_without_parameters_changes_nothing() {
+        let (_directory, registry, shared) = shared_with_mode();
+
+        let response = dispatch(&shared, request("windows.set", None));
+
+        assert!(response.ok, "{response:?}");
+        assert_eq!(registry.writes(), 0);
+    }
+
+    #[test]
+    fn windows_restore_puts_every_value_back_and_clears_the_selection() {
+        let (_directory, registry, shared) = shared_with_mode();
+        registry.set(Toggle::DesktopIcons, RawValue::Dword { value: 0 });
+
+        dispatch(
+            &shared,
+            request(
+                "windows.set",
+                Some(json!({ "toggles": { "desktopIcons": true, "taskView": true } })),
+            ),
+        );
+
+        let response = dispatch(&shared, request("windows.restore", None));
+        assert!(response.ok, "{response:?}");
+        let state = response.result.expect("state");
+
+        assert_eq!(state["enabled"], json!(false));
+        assert_eq!(state["toggles"]["desktopIcons"], json!(false));
+        assert_eq!(state["applied"]["desktopIcons"], json!(false));
+        assert_eq!(state["applied"]["taskView"], json!(false));
+        assert_eq!(
+            registry.get(Toggle::DesktopIcons),
+            RawValue::Dword { value: 0 }
+        );
+        assert_eq!(
+            registry.get(Toggle::TaskView),
+            RawValue::Absent,
+            "a value that did not exist is deleted again"
+        );
+        assert!(!shared.windows_applied());
+    }
+
+    #[test]
+    fn windows_set_with_enabled_false_restores_only_what_was_applied() {
+        let (_directory, registry, shared) = shared_with_mode();
+
+        dispatch(
+            &shared,
+            request(
+                "windows.set",
+                Some(json!({ "toggles": { "widgets": true, "copilot": true } })),
+            ),
+        );
+        let response = dispatch(
+            &shared,
+            request("windows.set", Some(json!({ "enabled": false }))),
+        );
+        assert!(response.ok, "{response:?}");
+        let state = response.result.expect("state");
+
+        assert_eq!(state["enabled"], json!(false));
+        assert_eq!(
+            state["toggles"]["widgets"],
+            json!(true),
+            "the selection is remembered for the next enable"
+        );
+        assert_eq!(state["applied"]["widgets"], json!(false));
+        assert_eq!(registry.get(Toggle::Widgets), RawValue::Absent);
+        assert_eq!(registry.get(Toggle::Copilot), RawValue::Absent);
     }
 }

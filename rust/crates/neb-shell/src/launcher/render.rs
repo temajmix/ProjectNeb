@@ -32,7 +32,7 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{BitBlt, HDC, SRCCOPY};
 use windows::core::Interface;
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use super::Entry;
 use crate::icons::IconBitmap;
@@ -550,15 +550,19 @@ impl LauncherRenderer {
 
     /// Draws one frame.
     ///
+    /// `scale` is the reveal animation's scale about the panel's centre; `1.0` is settled.
+    ///
     /// This allocates nothing: every layout, bitmap and brush it uses exists before it is called.
-    pub fn paint(&mut self, selection: Option<usize>, top: usize) -> PaintOutcome {
+    pub fn paint(&mut self, selection: Option<usize>, top: usize, scale: f32) -> PaintOutcome {
         let layout = self.layout;
 
         // SAFETY: `self.target` is live and every brush and layout belongs to it.
         let drawn = unsafe {
             self.target.BeginDraw();
+            self.set_scale(scale, layout);
             self.draw(layout, selection, top);
 
+            self.target.SetTransform(&Matrix3x2::identity());
             self.target
                 .EndDraw(None, None)
                 .map_err(|error| RenderError::call("end a launcher frame", error))
@@ -568,6 +572,28 @@ impl LauncherRenderer {
             Ok(()) => PaintOutcome::Painted,
             Err(error) if error.is_recreate() => PaintOutcome::Recreate,
             Err(error) => PaintOutcome::Failed(error),
+        }
+    }
+
+    /// Scales the frame about the panel's centre for the reveal animation.
+    ///
+    /// # Safety
+    ///
+    /// Must run inside a `BeginDraw`/`EndDraw` pair on `self.target`.
+    unsafe fn set_scale(&self, scale: f32, layout: LauncherLayout) {
+        let scale = scale.clamp(0.0, 1.0);
+        let (width, height) = layout.size;
+
+        // SAFETY: the caller guarantees an open draw call on this target.
+        unsafe {
+            self.target.SetTransform(&Matrix3x2 {
+                M11: scale,
+                M12: 0.0,
+                M21: 0.0,
+                M22: scale,
+                M31: (width / 2.0) * (1.0 - scale),
+                M32: (height / 2.0) * (1.0 - scale),
+            });
         }
     }
 

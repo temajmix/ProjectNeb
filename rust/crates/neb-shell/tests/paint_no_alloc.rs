@@ -19,12 +19,16 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use neb_core::strings::Language;
 use neb_shell::appbar::Edge;
 use neb_shell::geometry;
 use neb_shell::theme::Theme;
 use neb_shell::window::{self, BarSpec};
+use windows::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+};
 
 /// Counts every allocation the process makes.
 struct CountingAllocator;
@@ -55,6 +59,11 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
+/// The fresh-install widget list, parsed the way the shell parses the configuration.
+fn widgets() -> Vec<neb_shell::bar::WidgetSpec> {
+    neb_shell::bar::parse(&neb_core::config::default_widgets()).0
+}
+
 /// A bar on the first monitor, which is all a paint test needs.
 fn create_test_bar() -> windows::Win32::Foundation::HWND {
     let monitor = geometry::monitors()
@@ -69,6 +78,8 @@ fn create_test_bar() -> windows::Win32::Foundation::HWND {
         theme: Theme::baked_in(),
         language: Language::En,
         profile: Some("alloc-check".to_owned()),
+        widgets: widgets(),
+        animations: neb_core::config::AnimationSettings::default(),
         host: neb_shell::appbar::windows(),
     })
     .expect("the bar must be created")
@@ -106,6 +117,117 @@ fn a_hundred_frames_allocate_nothing() {
         "painting 100 frames allocated {} times",
         after - before
     );
+}
+
+/// The minute of the wall clock, used to tell a clock repaint from an idle one.
+fn local_minute() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() / 60)
+}
+
+/// Dispatches every message this thread has for `milliseconds`, sleeping between passes.
+fn pump_for(milliseconds: u64) {
+    let deadline = Instant::now() + Duration::from_millis(milliseconds);
+
+    while Instant::now() < deadline {
+        let mut message = MSG::default();
+
+        // SAFETY: `message` is a live out-parameter and the filters ask for every message on this
+        // thread, which is exactly what the real loop does.
+        while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+            // SAFETY: the message was filled in by `PeekMessageW` above.
+            unsafe {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Waits until the bar's slide and hover fades are finished, or `milliseconds` elapse.
+fn settle(hwnd: windows::Win32::Foundation::HWND, milliseconds: u64) {
+    let deadline = Instant::now() + Duration::from_millis(milliseconds);
+
+    while Instant::now() < deadline {
+        pump_for(20);
+        if !window::is_animating(hwnd) {
+            return;
+        }
+    }
+}
+
+#[test]
+fn an_idle_second_paints_no_frames() {
+    let _serial = SERIAL.lock().unwrap_or_else(|lock| lock.into_inner());
+    let hwnd = create_static_test_bar();
+
+    // The slide-in arms a 16 ms timer; once it is done, nothing should ask for another frame. One
+    // more pump lets the last animation tick run the window's final placement before the baseline.
+    settle(hwnd, 2_000);
+    pump_for(100);
+    assert!(
+        !window::is_animating(hwnd),
+        "the slide must have finished before the idle check"
+    );
+
+    let before = window::painted_frames(hwnd);
+    let minute = local_minute();
+    pump_for(1_100);
+    let after = window::painted_frames(hwnd);
+
+    destroy_bar_after_idle(hwnd, minute, before, after);
+}
+
+/// The assertion half, split out so the bar is destroyed even when the check fails.
+fn destroy_bar_after_idle(
+    hwnd: windows::Win32::Foundation::HWND,
+    minute: u64,
+    before: u64,
+    after: u64,
+) {
+    let same_minute = local_minute() == minute;
+    window::destroy_bar(hwnd);
+
+    if same_minute {
+        assert_eq!(
+            after,
+            before,
+            "an idle second drew {} frame(s); nothing changed, so nothing may paint",
+            after - before
+        );
+    }
+}
+
+/// A bar whose content never changes: one launcher glyph, no clock and no metrics. Only the
+/// slide-in runs, so any frame after it settles is a frame nothing asked for.
+fn create_static_test_bar() -> windows::Win32::Foundation::HWND {
+    use neb_core::config::BarWidget;
+
+    let monitor = geometry::monitors()
+        .into_iter()
+        .next()
+        .expect("a desktop session has at least one monitor");
+    let entries = [BarWidget {
+        kind: "launcher".to_owned(),
+        align: "left".to_owned(),
+        ..BarWidget::default()
+    }];
+
+    window::create_bar(BarSpec {
+        monitor,
+        edge: Edge::Top,
+        height_dip: 40,
+        theme: Theme::baked_in(),
+        language: Language::En,
+        profile: Some("idle-check".to_owned()),
+        widgets: neb_shell::bar::parse(&entries).0,
+        animations: neb_core::config::AnimationSettings::default(),
+        host: neb_shell::appbar::windows(),
+    })
+    .expect("the static bar must be created")
 }
 
 #[test]
@@ -165,6 +287,8 @@ fn create_test_dock() -> windows::Win32::Foundation::HWND {
         language: Language::En,
         items,
         auto_hide: false,
+        tile_dip: neb_shell::dock::layout::TILE_DIP,
+        animations: Default::default(),
         host: neb_shell::dock::window::windows(),
     })
     .expect("the dock must be created")
@@ -247,6 +371,7 @@ fn create_test_launcher() -> windows::Win32::Foundation::HWND {
         language: Language::En,
         entries: Arc::new(entries),
         building: false,
+        animations: Default::default(),
     })
     .expect("the launcher must be created")
 }

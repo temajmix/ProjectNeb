@@ -102,6 +102,34 @@ pub fn themes_dir() -> PathBuf {
     root().join("themes")
 }
 
+/// Directory holding Discord Rich Presence presets (`discord-presets\*.json`).
+pub fn discord_presets_dir() -> PathBuf {
+    root().join("discord-presets")
+}
+
+/// File holding the day/night theme schedule the supervisor reads.
+pub fn theme_schedule_file() -> PathBuf {
+    root().join("theme-schedule.json")
+}
+
+/// DPAPI-encrypted entitlement and session tokens (`license.json`).
+pub fn license_file() -> PathBuf {
+    root().join("license.json")
+}
+
+/// Cached `/api/keys/jwks` document (`cache\jwks.json`).
+pub fn jwks_cache_file() -> PathBuf {
+    root().join("cache").join("jwks.json")
+}
+
+/// File recording the registry values the Windows replacement mode changed.
+///
+/// It sits next to the config so a supervisor that starts while the mode is off can put every value
+/// back, even when the process that applied it is long gone.
+pub fn windows_mode_file() -> PathBuf {
+    root().join("windows-mode.json")
+}
+
 /// A `GUID`, declared here so the crate needs no Win32 binding dependency for one call.
 #[cfg(windows)]
 #[repr(C)]
@@ -240,6 +268,11 @@ mod tests {
         assert_eq!(logs_dir(), root.join("logs"));
         assert_eq!(profiles_dir(), root.join("profiles"));
         assert_eq!(themes_dir(), root.join("themes"));
+        assert_eq!(discord_presets_dir(), root.join("discord-presets"));
+        assert_eq!(theme_schedule_file(), root.join("theme-schedule.json"));
+        assert_eq!(windows_mode_file(), root.join("windows-mode.json"));
+        assert_eq!(license_file(), root.join("license.json"));
+        assert_eq!(jwks_cache_file(), root.join("cache").join("jwks.json"));
     }
 
     #[test]

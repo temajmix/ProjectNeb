@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "hyprland",
+  "name": "Hyprland",
+  "description": "Flat, thin and nearly square, with one high-contrast teal accent.",
+  "author": "ProjectNeb",
+  "tokens": {
+    "background": "#111318",
+    "surface": "#1A1D24",
+    "stroke": "#2E323C",
+    "text": "#E6E9EF",
+    "textDim": "#9AA1AF",
+    "accent": "#00E5C0",
+    "accent2": "#7AA2FF",
+    "radius": 2,
+    "opacity": 1.0,
+    "blur": false,
+    "font": "Segoe UI Variable Text",
+    "barHeight": 32,
+    "dockTile": 40
+  }
+}

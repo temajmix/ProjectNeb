@@ -92,16 +92,24 @@ impl RestartPlanner {
 
 /// Which children the configuration asks for.
 ///
-/// The keys are read from the raw JSON on purpose: `shell.enabled` and `wallpapers.enabled` are
-/// additive keys this build writes and the C# build ignores, so the typed [`Config`] carries them
-/// in `extra` rather than as fields, and a missing key must mean "the shipped default" rather than
-/// "whatever the typed default happens to be".
+/// The keys are read from the raw JSON on purpose: `shell.enabled`, `wallpapers.enabled` and
+/// `discord.enabled` are additive keys this build writes and the C# build ignores, so the typed
+/// [`Config`] carries them in `extra` rather than as fields, and a missing key must mean "the
+/// shipped default" rather than "whatever the typed default happens to be".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Enabled {
     /// Run `neb-shell.exe`.
     pub shell: bool,
     /// Run `neb-wallpaper.exe`.
     pub wallpaper: bool,
+    /// Run `neb-discord.exe`.
+    pub discord: bool,
+    /// Run `neb-wm.exe`.
+    pub wm: bool,
+    /// Run `neb-zapret.exe`.
+    pub zapret: bool,
+    /// Run `neb-windhawk.exe`.
+    pub windhawk: bool,
 }
 
 impl Default for Enabled {
@@ -109,18 +117,26 @@ impl Default for Enabled {
         Self {
             shell: true,
             wallpaper: false,
+            discord: false,
+            wm: false,
+            zapret: false,
+            windhawk: false,
         }
     }
 }
 
 impl Enabled {
-    /// Reads the two switches out of a parsed `config.json`.
+    /// Reads the three switches out of a parsed `config.json`.
     pub fn from_json(config: &Value) -> Self {
         Self {
             // `shell.enabled` is this build's key; the C#-compatible file spells the same idea
             // `shell.barEnabled`, so either one turns the shell on.
             shell: switch(config, "shell", &["barEnabled"]).unwrap_or(true),
             wallpaper: switch(config, "wallpapers", &[]).unwrap_or(false),
+            discord: switch(config, "discord", &[]).unwrap_or(false),
+            wm: switch(config, "windowManager", &[]).unwrap_or(false),
+            zapret: switch(config, "zapret", &[]).unwrap_or(false),
+            windhawk: switch(config, "windhawk", &[]).unwrap_or(false),
         }
     }
 
@@ -723,7 +739,11 @@ mod tests {
             Enabled::from_json(&csharp),
             Enabled {
                 shell: true,
-                wallpaper: true
+                wallpaper: true,
+                discord: false,
+                wm: false,
+                zapret: false,
+                windhawk: false
             }
         );
     }
@@ -734,7 +754,11 @@ mod tests {
             Enabled::default(),
             Enabled {
                 shell: true,
-                wallpaper: false
+                wallpaper: false,
+                discord: false,
+                wm: false,
+                zapret: false,
+                windhawk: false
             }
         );
     }
@@ -752,7 +776,11 @@ mod tests {
             Enabled::from_json(&explicit),
             Enabled {
                 shell: false,
-                wallpaper: true
+                wallpaper: true,
+                discord: false,
+                wm: false,
+                zapret: false,
+                windhawk: false
             }
         );
 
@@ -761,7 +789,11 @@ mod tests {
             Enabled::from_json(&partial),
             Enabled {
                 shell: true,
-                wallpaper: true
+                wallpaper: true,
+                discord: false,
+                wm: false,
+                zapret: false,
+                windhawk: false
             },
             "a missing shell section leaves the shell on"
         );
@@ -771,6 +803,23 @@ mod tests {
             Enabled::from_json(&wrong_type).shell,
             "a bad value is ignored"
         );
+
+        let discord = serde_json::json!({ "discord": { "enabled": true } });
+        assert!(
+            Enabled::from_json(&discord).discord,
+            "discord.enabled starts the Rich Presence process"
+        );
+        assert!(
+            !Enabled::from_json(&empty).discord,
+            "the shipped config leaves Discord off"
+        );
+
+        let windhawk = serde_json::json!({ "windhawk": { "enabled": true } });
+        assert!(
+            Enabled::from_json(&windhawk).windhawk,
+            "windhawk.enabled starts the integration process"
+        );
+        assert!(!Enabled::from_json(&empty).windhawk, "Windhawk is opt-in");
     }
 
     #[test]

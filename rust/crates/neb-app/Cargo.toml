@@ -1,0 +1,42 @@
+[package]
+name = "neb-app"
+description = "ProjectNeb settings window: WebView2 host with the dashboard bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "neb-app"
+path = "src/main.rs"
+
+[dependencies]
+neb-core = { path = "../neb-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_path_to_error = "0.1"
+thiserror = { workspace = true }
+webview2-com = "0.39"
+windows = { workspace = true, features = [
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+] }
+windows-core = "0.62"
+
+# The build script copies the loader out of this crate's build output, so it has to be built
+# before `build.rs` runs. As a normal dependency it is only guaranteed to be linked later, and
+# the two build scripts race: the release build then ships `neb-app.exe` without its DLL.
+[build-dependencies]
+webview2-com-sys = "0.39"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+neb-core = { path = "../neb-core", features = ["test-support"] }
+
+[lints]
+workspace = true

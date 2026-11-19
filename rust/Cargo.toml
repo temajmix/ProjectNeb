@@ -1,15 +1,21 @@
-[workspace]
+﻿[workspace]
 resolver = "3"
 members = [
+    "crates/neb-app",
     "crates/neb-core",
     "crates/neb-cli",
     "crates/neb-shell",
     "crates/neb-supervisor",
+    "crates/neb-discord",
+    "crates/neb-updater",
     "crates/neb-wallpaper",
+    "crates/neb-wm",
+    "crates/neb-zapret",
+    "crates/neb-windhawk",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 publish = false
@@ -17,9 +23,11 @@ publish = false
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
+sha2 = "0.10"
 thiserror = "2.0"
 tempfile = "3.14"
 windows-numerics = "0.3"
+zip = { version = "7.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # Win32 only, one feature list shared by every crate that talks to the OS, so the surface is
 # auditable in a single place.
@@ -44,9 +52,16 @@ missing_debug_implementations = "warn"
 [workspace.lints.clippy]
 all = "deny"
 
+# `neb-app` names `webview2-com-sys` as a build-dependency only to order its build script before
+# ours, which copies `WebView2Loader.dll` out of that script's output. Nothing calls the crate, so
+# the manifest lint would warn on a dependency that is doing real work.
+[workspace.lints.cargo]
+unused_dependencies = "allow"
+
 [profile.release]
 opt-level = "s"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+

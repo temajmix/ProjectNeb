@@ -23,6 +23,12 @@
     "dockEnabled": true,
     "pinnedApps": [],
     "dockAutoHide": true
+  },
+  "updates": {
+    "enabled": true,
+    "manifestUrl": "https://raw.githubusercontent.com/temajmix/ProjectNeb/main/latest.json",
+    "checkHours": 6,
+    "autoApply": true
   }
 }
 

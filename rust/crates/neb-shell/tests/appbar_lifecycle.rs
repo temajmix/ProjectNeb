@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use neb_core::strings::Language;
 use neb_shell::appbar::{APPBARDATA, Call, Edge, EdgeHost};
+use neb_shell::bar::WidgetSpec;
 use neb_shell::geometry::{self, Rect};
 use neb_shell::theme::Theme;
 use neb_shell::window::{self, BarSpec};
@@ -108,6 +109,11 @@ impl EdgeHost for CountingHost {
     }
 }
 
+/// The fresh-install widget list, parsed the way the shell parses the configuration.
+fn default_widgets() -> Vec<WidgetSpec> {
+    neb_shell::bar::parse(&neb_core::config::default_widgets()).0
+}
+
 /// One bar on the first monitor of this machine, talking to `host`.
 fn create(host: &Arc<CountingHost>) -> HWND {
     let monitor = geometry::monitors()
@@ -123,6 +129,8 @@ fn create(host: &Arc<CountingHost>) -> HWND {
         theme: Theme::baked_in(),
         language: Language::En,
         profile: Some("lifecycle".to_owned()),
+        widgets: default_widgets(),
+        animations: neb_core::config::AnimationSettings::default(),
         host,
     })
     .expect("the bar window must be created")

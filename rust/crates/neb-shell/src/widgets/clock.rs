@@ -57,8 +57,8 @@ fn local_now() -> windows::Win32::Foundation::SYSTEMTIME {
 /// `Понедельник, 16 ноября` / `Monday, 16 November`.
 ///
 /// `day_of_week` is `SYSTEMTIME`'s Sunday-first value; the table is Monday-first, so it is rotated.
-pub fn compose_date(
-    target: &mut WideBuf<48>,
+pub fn compose_date<const N: usize>(
+    target: &mut WideBuf<N>,
     day_of_week: u16,
     day: u16,
     month_of_year: u16,

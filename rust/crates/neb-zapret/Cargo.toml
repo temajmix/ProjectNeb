@@ -1,0 +1,34 @@
+[package]
+name = "neb-zapret"
+description = "ProjectNeb DPI-bypass module: imports a zapret pack, parses its strategies and runs winws.exe through an elevated helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "neb_zapret"
+path = "src/lib.rs"
+
+[[bin]]
+name = "neb-zapret"
+path = "src/main.rs"
+
+[dependencies]
+neb-core = { path = "../neb-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
+    "Win32_System_Services",
+    "Win32_UI_Shell",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

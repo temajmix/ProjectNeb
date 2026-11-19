@@ -5,7 +5,7 @@
 //! time a sample arrives. [`BarText`] is the small, copyable-by-hand result, and [`WideBuf`] is the
 //! UTF-16 buffer behind each widget.
 
-mod clock;
+pub(crate) mod clock;
 pub mod metrics;
 
 pub use clock::ClockText;
@@ -60,6 +60,13 @@ impl<const N: usize> WideBuf<N> {
     pub fn push_str(&mut self, text: &str) {
         for unit in text.encode_utf16() {
             self.push_unit(unit);
+        }
+    }
+
+    /// Appends another fixed buffer, dropping what does not fit.
+    pub fn push_buffer<const M: usize>(&mut self, other: &WideBuf<M>) {
+        for unit in other.as_units() {
+            self.push_unit(*unit);
         }
     }
 

@@ -11,10 +11,13 @@
 
 use std::mem::size_of;
 
-use windows::Win32::Foundation::FILETIME;
+use windows::Win32::Foundation::{CloseHandle, FILETIME};
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-use windows::Win32::System::Threading::{GetCurrentProcess, GetSystemTimes};
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, GetSystemTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_VM_READ,
+};
 
 /// Bytes in a gibibyte, the unit the dashboard shows.
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -55,6 +58,53 @@ pub fn working_set_bytes() -> Option<usize> {
     unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) }.ok()?;
 
     Some(counters.WorkingSetSize)
+}
+
+/// Working set of another process in bytes, or `None` when it is gone or the API refuses.
+///
+/// The settings window reports the bar, wallpaper and supervisor next to its own number, so the
+/// process id it got from `supervisor.getState` is all it has to go on. An exited process, a pid
+/// reused by another user's process and a protected process all answer `None`, which the dashboard
+/// paints as an em dash rather than a wrong number.
+pub fn working_set_of_process(pid: u32) -> Option<usize> {
+    if pid == 0 {
+        return None;
+    }
+
+    // SAFETY: the pid is a plain number; the returned handle is owned by `process` below.
+    let process = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+            false,
+            pid,
+        )
+    }
+    .ok()?;
+    // SAFETY: `process` is a live handle this function owns and closes exactly once, here.
+    let process = ProcessHandle(process);
+
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        ..PROCESS_MEMORY_COUNTERS::default()
+    };
+
+    // SAFETY: the handle is open for the duration of the call and `counters` declares its size.
+    unsafe { GetProcessMemoryInfo(process.0, &mut counters, counters.cb) }.ok()?;
+
+    Some(counters.WorkingSetSize)
+}
+
+/// A process handle, closed on drop.
+#[derive(Debug)]
+struct ProcessHandle(windows::Win32::Foundation::HANDLE);
+
+impl Drop for ProcessHandle {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from `OpenProcess` and is closed exactly once, here.
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
 }
 
 /// Reads the machine's load, remembering the previous CPU totals between calls.
@@ -321,6 +371,21 @@ mod tests {
         let bytes = working_set_bytes().expect("this process must report its working set");
 
         assert!(bytes > 0, "working set must be non-zero");
+    }
+
+    #[test]
+    fn another_process_reports_its_working_set_by_pid() {
+        let bytes = working_set_of_process(std::process::id())
+            .expect("this process must be readable by its own pid");
+
+        assert!(bytes > 0, "working set must be non-zero");
+        assert!(bytes >= working_set_bytes().unwrap_or(0) / 2, "{bytes}");
+    }
+
+    #[test]
+    fn a_missing_pid_is_none_not_a_guess() {
+        assert_eq!(working_set_of_process(0), None);
+        assert_eq!(working_set_of_process(u32::MAX), None);
     }
 
     #[test]

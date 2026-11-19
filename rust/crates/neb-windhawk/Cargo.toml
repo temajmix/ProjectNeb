@@ -1,0 +1,36 @@
+[package]
+name = "neb-windhawk"
+description = "ProjectNeb Windhawk integration: detect the install, browse the mod catalog, install mods through an elevated helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "neb_windhawk"
+path = "src/lib.rs"
+
+[[bin]]
+name = "neb-windhawk"
+path = "src/main.rs"
+
+[dependencies]
+neb-core = { path = "../neb-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_Networking_WinHttp",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

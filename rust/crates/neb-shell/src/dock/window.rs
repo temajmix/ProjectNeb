@@ -15,9 +15,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use neb_core::config::AnimationSettings;
 use neb_core::strings::{Language, Text, get};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, HDC, InvalidateRect, PAINTSTRUCT};
+use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, HDC, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::Controls::{
@@ -28,15 +29,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, Tr
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
     GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, HTCLIENT, HWND_NOTOPMOST,
-    HWND_TOPMOST, KillTimer, PostMessageW, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SendMessageW, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY,
-    WM_NCHITTEST, WM_PAINT, WM_PRINTCLIENT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_POPUPWINDOW,
+    HWND_TOPMOST, IDC_ARROW, KillTimer, LoadCursorW, PostMessageW, RegisterClassW, SW_HIDE,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SendMessageW,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
+    WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WM_PRINTCLIENT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_POPUPWINDOW,
 };
 use windows::core::{PCWSTR, PWSTR};
 
+use crate::anim::{DOCK_SLIDE_MS, FRAME_MS, HOVER_MS, Transition, now_ms};
 use crate::geometry::{Monitor, Rect};
 use crate::render::PaintOutcome;
 use crate::theme::Theme;
@@ -45,8 +47,8 @@ use crate::window::{self as bar_window, WindowError};
 
 use super::autohide::{self, Autohide, POLL_MS};
 use super::fullscreen;
-use super::layout::{self, DockPlan, Metrics, TILE_DIP};
-use super::render::DockRenderer;
+use super::layout::{self, DockPlan, Metrics};
+use super::render::{DockRenderer, FrameFx};
 use super::running::{self, RunningApp};
 use super::{Click, DockItem};
 
@@ -58,6 +60,9 @@ pub const WM_DOCK_RUNNING: u32 = WM_APP + 5;
 
 /// The auto-hide and fullscreen poll timer.
 const TIMER_POLL: usize = 21;
+
+/// The 16 ms timer that runs only while the dock is sliding or a hover is fading.
+const TIMER_ANIM: usize = 22;
 
 /// How often the foreground is asked whether a fullscreen application owns the screen.
 ///
@@ -139,6 +144,10 @@ pub struct DockSpec {
     pub items: Vec<DockItem>,
     /// Whether the strip stays hidden until the pointer reaches the bottom edge.
     pub auto_hide: bool,
+    /// The tile side in device-independent pixels: the theme's `dockTile`, or the shipped default.
+    pub tile_dip: i32,
+    /// The user's motion preferences.
+    pub animations: AnimationSettings,
     /// Where the placement calls go; the shell itself, or a recorder in a test.
     pub host: Arc<dyn DockPlacement>,
 }
@@ -163,6 +172,22 @@ struct DockState {
     /// Where the placement calls go.
     host: Arc<dyn DockPlacement>,
     hover: Option<usize>,
+    /// How far the hover highlight under the pointer has faded in.
+    hover_fade: Transition,
+    /// The tile the pointer just left, while its highlight fades out.
+    previous_hover: Option<usize>,
+    /// How far the previous tile's highlight still is.
+    previous_fade: Transition,
+    /// Whether the window is currently shown, including while it is sliding away.
+    shown: bool,
+    /// The slide: `0.0` below the strip, `1.0` in place.
+    slide: Transition,
+    /// Whether the 16 ms animation timer is armed.
+    animating: bool,
+    /// The tile side the plan was built with, in DIPs.
+    tile_dip: i32,
+    /// The user's motion preferences.
+    animations: AnimationSettings,
     tooltip: Option<Tooltip>,
     /// A pointer sample waiting for the next tick; [`probe_pointer`] writes this.
     pointer: Option<(i32, i32)>,
@@ -174,7 +199,7 @@ struct DockState {
 
 impl DockState {
     fn new(hwnd: HWND, spec: DockSpec) -> Self {
-        let plan = plan_for(&spec.items, &spec.monitor);
+        let plan = plan_for(&spec.items, &spec.monitor, spec.tile_dip);
         let rect = layout::place(&spec.monitor, &plan);
         let renderer = make_renderer(
             u32::try_from(plan.width).unwrap_or(1),
@@ -199,6 +224,14 @@ impl DockState {
             last_check: 0,
             host: spec.host,
             hover: None,
+            hover_fade: Transition::settled(0.0),
+            previous_hover: None,
+            previous_fade: Transition::settled(0.0),
+            shown: false,
+            slide: Transition::settled(0.0),
+            animating: false,
+            tile_dip: spec.tile_dip,
+            animations: spec.animations,
             tooltip: None,
             pointer: None,
             busy: false,
@@ -241,27 +274,54 @@ impl DockState {
         !self.items.is_empty() && !self.fullscreen && !self.autohide.is_hidden()
     }
 
-    /// Shows or hides the window to match [`visible`](Self::visible), re-asserting the topmost band
-    /// when it appears.
-    fn show_or_hide(&self) {
-        // SAFETY: `hwnd` is a live window of this process. `SW_SHOWNOACTIVATE` is what keeps the dock
-        // from taking focus away from whatever the user is typing in.
-        unsafe {
-            let _ = ShowWindow(
-                self.hwnd,
-                if self.visible() {
-                    SW_SHOWNOACTIVATE
-                } else {
-                    SW_HIDE
-                },
-            );
-        }
-
+    /// Shows or hides the window to match [`visible`](Self::visible), sliding it into or out of place.
+    fn show_or_hide(&mut self) {
         if self.visible() {
+            if !self.shown {
+                self.shown = true;
+                // SAFETY: `hwnd` is a live window of this process. `SW_SHOWNOACTIVATE` is what keeps
+                // the dock from taking focus away from whatever the user is typing in.
+                unsafe {
+                    let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                }
+                self.begin_slide(true);
+            }
+
             // `ShowWindow` can put the window back at the top of the *non-topmost* band on some
             // transitions, and a dock under a maximised window is the defect this exists to prevent.
             self.host.raise(self.hwnd);
+        } else if self.shown {
+            // The window stays on screen until the slide has taken it out of view; the animation
+            // tick hides it then.
+            self.begin_slide(false);
         }
+    }
+
+    /// Starts the dock's slide towards `shown` (`0.0` down, `1.0` up).
+    fn begin_slide(&mut self, shown: bool) {
+        let now = now_ms();
+        let target = if shown { 1.0 } else { 0.0 };
+
+        self.slide = Transition::scaled(
+            now,
+            self.slide.value(now),
+            target,
+            DOCK_SLIDE_MS,
+            &self.animations,
+        );
+
+        // With animations off the slide has no duration and no timer will ever fire, so the hide has
+        // to happen here rather than in `animation_step`.
+        if self.slide.is_done(now) && target == 0.0 && self.shown {
+            self.shown = false;
+            // SAFETY: `hwnd` is a live window of this process and the slide is already over.
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
+        }
+
+        self.arm_animation();
+        self.paint();
     }
 
     /// Moves the window to its strip, in the topmost band.
@@ -271,7 +331,7 @@ impl DockState {
 
     /// Re-plans for the current items and monitor, then repaints.
     fn relayout(&mut self) {
-        self.plan = plan_for(&self.items, &self.monitor);
+        self.plan = plan_for(&self.items, &self.monitor, self.tile_dip);
         self.rect = layout::place(&self.monitor, &self.plan);
         self.place_window();
 
@@ -319,19 +379,78 @@ impl DockState {
 
     /// One attempt at a frame.
     fn paint_once(&mut self) -> PaintOutcome {
+        let frame = FrameFx {
+            slide: self.slide.value(now_ms()),
+            hover: self.hover,
+            hover_fade: self.hover_fade.value(now_ms()),
+            previous: self.previous_hover,
+            previous_fade: self.previous_fade.value(now_ms()),
+        };
+
         match self.renderer.as_mut() {
-            Some(renderer) => renderer.paint(self.hwnd, &self.plan, &self.items, self.hover),
+            Some(renderer) => renderer.paint(self.hwnd, &self.plan, &self.items, frame),
             None => PaintOutcome::Failed(crate::render::RenderError::Unavailable(
                 "the dock has no renderer".to_owned(),
             )),
         }
     }
 
-    /// Asks for a repaint, which Windows may coalesce with another one.
-    fn invalidate(&self) {
-        // SAFETY: `hwnd` is a live window.
+    /// Arms the 16 ms animation timer unless everything is already at rest.
+    fn arm_animation(&mut self) {
+        if self.animating || !self.is_animating(now_ms()) {
+            return;
+        }
+
+        self.animating = true;
+        // SAFETY: `hwnd` is this window and the timer id is ours.
         unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
+            SetTimer(Some(self.hwnd), TIMER_ANIM, FRAME_MS, None);
+        }
+    }
+
+    /// Kills the animation timer; a later transition arms it again.
+    fn stop_animation(&mut self) {
+        if !self.animating {
+            return;
+        }
+
+        self.animating = false;
+        // SAFETY: `hwnd` is this window and the id belongs to the animation timer.
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
+        }
+    }
+
+    /// Whether the dock is sliding or a hover highlight is still moving.
+    fn is_animating(&self, now: u64) -> bool {
+        !self.slide.is_done(now)
+            || !self.hover_fade.is_done(now)
+            || !self.previous_fade.is_done(now)
+    }
+
+    /// One 16 ms animation frame.
+    fn animation_step(&mut self) {
+        let now = now_ms();
+
+        if self.shown {
+            self.paint();
+        }
+
+        if self.slide.is_done(now) && self.slide.target() == 0.0 && self.shown {
+            self.shown = false;
+            // SAFETY: `hwnd` is a live window of this process and the slide has taken it out of view.
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
+        }
+
+        if !self.is_animating(now) {
+            self.previous_hover = None;
+            self.stop_animation();
+
+            if self.shown {
+                self.paint();
+            }
         }
     }
 
@@ -435,17 +554,51 @@ impl DockState {
     fn pointer_moved(&mut self, x: i32, y: i32) {
         let hover = self.plan.slot_at(x, y);
 
-        if hover != self.hover {
-            self.hover = hover;
-            self.update_tooltip();
-            self.invalidate();
+        if hover == self.hover {
+            return;
+        }
+
+        let now = now_ms();
+        // The tile being left keeps its highlight while it fades out; the new one fades in.
+        self.previous_hover = self.hover;
+        self.previous_fade = Transition::scaled(
+            now,
+            self.hover_fade.value(now),
+            0.0,
+            HOVER_MS,
+            &self.animations,
+        );
+        self.hover = hover;
+        self.hover_fade = Transition::scaled(now, 0.0, 1.0, HOVER_MS, &self.animations);
+
+        self.update_tooltip();
+        self.arm_animation();
+
+        if !self.animating {
+            self.paint();
         }
     }
 
     /// The pointer left the strip.
     fn pointer_left(&mut self) {
-        if self.hover.take().is_some() {
-            self.invalidate();
+        if self.hover.is_none() && self.previous_hover.is_none() {
+            return;
+        }
+
+        let now = now_ms();
+        self.previous_hover = self.hover.take();
+        self.previous_fade = Transition::scaled(
+            now,
+            self.hover_fade.value(now),
+            0.0,
+            HOVER_MS,
+            &self.animations,
+        );
+        self.hover_fade = Transition::settled(0.0);
+        self.arm_animation();
+
+        if !self.animating {
+            self.paint();
         }
     }
 
@@ -536,8 +689,8 @@ fn make_renderer(
 }
 
 /// Plans the strip for `items` on `monitor`, in physical pixels.
-fn plan_for(items: &[DockItem], monitor: &Monitor) -> DockPlan {
-    layout::plan(items.len(), monitor.rect, monitor.to_pixels(TILE_DIP))
+fn plan_for(items: &[DockItem], monitor: &Monitor, tile_dip: i32) -> DockPlan {
+    layout::plan(items.len(), monitor.rect, monitor.to_pixels(tile_dip))
 }
 
 /// The client rectangle of one slot, in physical pixels.
@@ -708,6 +861,10 @@ unsafe extern "system" fn dock_proc(
             }
             WM_TIMER if wparam.0 == TIMER_POLL => {
                 state.tick();
+                LRESULT(0)
+            }
+            WM_TIMER if wparam.0 == TIMER_ANIM => {
+                state.animation_step();
                 LRESULT(0)
             }
             WM_DPICHANGED => {
@@ -882,11 +1039,13 @@ fn register_class() -> Result<(), WindowError> {
             lpfnWndProc: Some(dock_proc),
             hInstance: instance(),
             lpszClassName: PCWSTR(name.as_ptr()),
+            hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default(),
             ..WNDCLASSW::default()
         };
 
         // SAFETY: `window_class` is fully initialised and the class name it points at outlives the
-        // call; a null background brush keeps the strip from flashing before the first frame.
+        // call; a null background brush keeps the strip from flashing before the first frame. The
+        // arrow cursor is set on the class so a stale "app starting" spinner never sticks to the dock.
         unsafe { RegisterClassW(&window_class) != 0 }
     });
 
@@ -905,7 +1064,7 @@ fn register_class() -> Result<(), WindowError> {
 pub fn create_dock(spec: DockSpec) -> Result<HWND, WindowError> {
     register_class()?;
 
-    let plan = plan_for(&spec.items, &spec.monitor);
+    let plan = plan_for(&spec.items, &spec.monitor, spec.tile_dip);
     let rect = layout::place(&spec.monitor, &plan);
     let class = wide(DOCK_CLASS);
     let title = wide("ProjectNeb dock");
@@ -1147,6 +1306,7 @@ fn wide(text: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dock::layout::TILE_DIP;
 
     #[test]
     fn the_custom_message_continues_the_bar_sequence() {

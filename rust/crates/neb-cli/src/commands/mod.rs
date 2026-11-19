@@ -3,6 +3,8 @@
 pub mod config;
 pub mod metrics;
 pub mod ping;
+pub mod release;
+pub mod themes;
 pub mod windows;
 
 use std::fmt;

@@ -12,6 +12,11 @@
 //!
 //! Coordinates are device-independent pixels throughout: the render target is created at the
 //! monitor's DPI, so a 40 DIP bar is 40 DIP of drawing on a 100 % and on a 150 % display alike.
+//!
+//! Since this slice the frame is a list of [`WidgetLayout`]s rather than four fixed blocks. Their
+//! rectangles come from [`crate::bar::layout`], a pure function; the painter only walks the list and
+//! picks a brush and a glyph shape. A widget with no text layout (launcher, settings, spacer) draws no
+//! text, which is also why a spacer is absent from the list.
 
 use std::sync::OnceLock;
 
@@ -39,17 +44,18 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::core::PCWSTR;
 use windows_numerics::Vector2;
 
-use crate::theme::Theme;
-use crate::widgets::BarText;
+use crate::bar::layout::{Measured, Placement, place};
+use crate::bar::widgets::{WidgetKind, WidgetSpec, WidgetText};
+use crate::theme::{SURFACE_ALPHA, Theme};
 
 /// Padding between the bar's edge and its first widget, in DIPs.
-pub const PADDING: f32 = 16.0;
+pub const PADDING: f32 = crate::bar::layout::PADDING;
 
 /// Side of the square the launcher glyph is drawn in.
 pub const GLYPH: f32 = 16.0;
 
 /// Space between the launcher glyph and the profile name, and between the metrics and the gear.
-pub const GAP: f32 = 8.0;
+pub const GAP: f32 = crate::bar::layout::GAP;
 
 /// Side of the gear glyph.
 pub const GEAR: f32 = 8.0;
@@ -59,6 +65,9 @@ pub const BORDER: f32 = 1.0;
 
 /// Bar height below which the two-line clock does not fit and the date is hidden.
 pub const TWO_LINE_MIN_HEIGHT: f32 = 34.0;
+
+/// How much room a hover highlight gives around the glyph it belongs to.
+const HOVER_PAD: f32 = 6.0;
 
 /// `D2DERR_RECREATE_TARGET`: the device went away and everything drawn with it is worthless.
 const D2DERR_RECREATE_TARGET: i32 = 0x8899_000C_u32 as i32;
@@ -104,23 +113,10 @@ impl RenderError {
 }
 
 /// The process-wide Direct2D and DirectWrite state.
-///
-/// Both factories are documented as safe to share between threads; this process only ever uses them
-/// from the UI thread, which is why the Direct2D factory is created single-threaded.
 #[derive(Debug)]
 pub struct Resources {
     factory: ID2D1Factory,
     dwrite: IDWriteFactory,
-    fonts: Fonts,
-}
-
-/// The text formats the bar draws with, created once per process.
-#[derive(Debug)]
-struct Fonts {
-    clock: IDWriteTextFormat,
-    date: IDWriteTextFormat,
-    metrics: IDWriteTextFormat,
-    profile: IDWriteTextFormat,
 }
 
 /// The families the bar asks for, best first; each is tried until one exists.
@@ -157,43 +153,7 @@ impl Resources {
         let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
             .map_err(|error| RenderError::call("create the DirectWrite factory", error))?;
 
-        let locale = user_locale();
-        let fonts = Fonts {
-            clock: text_format(
-                &dwrite,
-                &locale,
-                &UI_FAMILIES,
-                CLOCK_SIZE,
-                DWRITE_FONT_WEIGHT_SEMI_BOLD,
-            )?,
-            date: text_format(
-                &dwrite,
-                &locale,
-                &UI_FAMILIES,
-                DATE_SIZE,
-                DWRITE_FONT_WEIGHT_NORMAL,
-            )?,
-            metrics: text_format(
-                &dwrite,
-                &locale,
-                &MONO_FAMILIES,
-                METRICS_SIZE,
-                DWRITE_FONT_WEIGHT_NORMAL,
-            )?,
-            profile: text_format(
-                &dwrite,
-                &locale,
-                &UI_FAMILIES,
-                PROFILE_SIZE,
-                DWRITE_FONT_WEIGHT_NORMAL,
-            )?,
-        };
-
-        Ok(Self {
-            factory,
-            dwrite,
-            fonts,
-        })
+        Ok(Self { factory, dwrite })
     }
 
     /// The DirectWrite factory, for the layout cache.
@@ -204,6 +164,66 @@ impl Resources {
     /// The Direct2D factory, for a window that draws into its own target — the dock's layered bitmap.
     pub(crate) fn factory(&self) -> &ID2D1Factory {
         &self.factory
+    }
+}
+
+/// The text formats one frame's layouts are built with.
+///
+/// A theme may name its own font, so the formats cannot live in the process-wide [`Resources`] any
+/// more: they are created while the layouts are (outside `paint`) and dropped with them.
+#[derive(Debug)]
+struct Formats {
+    clock: IDWriteTextFormat,
+    date: IDWriteTextFormat,
+    metrics: IDWriteTextFormat,
+    body: IDWriteTextFormat,
+}
+
+impl Formats {
+    fn create(dwrite: &IDWriteFactory, theme: &Theme) -> Result<Self, RenderError> {
+        let locale = user_locale();
+        let ui = [theme.font.as_str(), UI_FAMILIES[0], UI_FAMILIES[1]];
+        let mono = [
+            MONO_FAMILIES[0],
+            MONO_FAMILIES[1],
+            theme.font.as_str(),
+            UI_FAMILIES[1],
+        ];
+
+        Ok(Self {
+            clock: text_format(
+                dwrite,
+                &locale,
+                &ui,
+                CLOCK_SIZE,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            )?,
+            date: text_format(dwrite, &locale, &ui, DATE_SIZE, DWRITE_FONT_WEIGHT_NORMAL)?,
+            metrics: text_format(
+                dwrite,
+                &locale,
+                &mono,
+                METRICS_SIZE,
+                DWRITE_FONT_WEIGHT_NORMAL,
+            )?,
+            body: text_format(
+                dwrite,
+                &locale,
+                &ui,
+                PROFILE_SIZE,
+                DWRITE_FONT_WEIGHT_NORMAL,
+            )?,
+        })
+    }
+
+    /// The format a widget's line is drawn with.
+    fn for_widget(&self, kind: WidgetKind) -> &IDWriteTextFormat {
+        match kind {
+            WidgetKind::Clock => &self.clock,
+            WidgetKind::Date => &self.date,
+            WidgetKind::Metrics => &self.metrics,
+            _ => &self.body,
+        }
     }
 }
 
@@ -257,10 +277,6 @@ pub(crate) fn text_format(
 }
 
 /// A rasterised frame: the render target and the brushes that belong to it.
-///
-/// Only the four colours the bar actually draws get a brush. The theme's `surface`, `accent` and
-/// `accent2` tokens are still parsed and validated — a theme file has to stay valid for the C# build —
-/// but a brush that no frame ever fills with would be dead weight in a process with a memory budget.
 #[derive(Debug)]
 struct Surface {
     target: ID2D1HwndRenderTarget,
@@ -268,6 +284,7 @@ struct Surface {
     text: ID2D1SolidColorBrush,
     dim: ID2D1SolidColorBrush,
     stroke: ID2D1SolidColorBrush,
+    hover: ID2D1SolidColorBrush,
 }
 
 impl Surface {
@@ -326,6 +343,7 @@ impl Surface {
         let text = brush(&theme.text)?;
         let dim = brush(&theme.text_dim)?;
         let stroke = brush(&theme.stroke)?;
+        let hover = brush(&theme.text)?;
 
         Ok(Self {
             target,
@@ -333,6 +351,7 @@ impl Surface {
             text,
             dim,
             stroke,
+            hover,
         })
     }
 
@@ -432,7 +451,7 @@ impl Renderer {
     ///
     /// This is the only place that touches the render target, and it allocates nothing: every brush,
     /// format and layout it uses was created before it was called.
-    pub fn paint(&mut self, theme: &Theme, layouts: &Layouts) -> PaintOutcome {
+    pub fn paint(&mut self, theme: &Theme, layouts: &Layouts, hover: Hover) -> PaintOutcome {
         if self.surface.is_none() {
             match Surface::create(self.resources, self.hwnd, self.pixel, self.dpi, theme) {
                 Ok(surface) => self.surface = Some(surface),
@@ -447,7 +466,7 @@ impl Renderer {
             return PaintOutcome::Recreate;
         };
 
-        let result = paint_into(&surface, theme, layouts);
+        let result = paint_into(&surface, theme, layouts, hover);
 
         match result {
             Ok(()) => {
@@ -463,16 +482,33 @@ impl Renderer {
     }
 }
 
+/// How far each hovored glyph has faded in, `0..=1`.
+///
+/// A plain value so `paint` stays independent of the animation state machine; the window computes it
+/// from the transitions once per frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Hover {
+    /// The launcher tile.
+    pub launcher: f32,
+    /// The settings tile.
+    pub settings: f32,
+}
+
 /// Draws one frame into `surface`.
 ///
 /// Direct2D's `BeginDraw`, `Clear`, the `Fill*` calls and `DrawTextLayout` are all `void`; only
 /// `EndDraw` reports anything, which is why the frame's verdict is decided there.
-fn paint_into(surface: &Surface, theme: &Theme, layouts: &Layouts) -> Result<(), RenderError> {
+fn paint_into(
+    surface: &Surface,
+    theme: &Theme,
+    layouts: &Layouts,
+    hover: Hover,
+) -> Result<(), RenderError> {
     // SAFETY: `surface` is this process's render target for the current window and every structure
     // below is a plain value that outlives the call.
     unsafe {
         surface.target.BeginDraw();
-        draw(surface, theme, layouts);
+        draw(surface, theme, layouts, hover);
 
         // `EndDraw` runs even when a drawing call was skipped: leaving a frame open would wedge the
         // target for good.
@@ -483,12 +519,12 @@ fn paint_into(surface: &Surface, theme: &Theme, layouts: &Layouts) -> Result<(),
     }
 }
 
-/// Draws the whole strip: background, border, and the three groups of widgets.
+/// Draws the whole strip: background, border, and every widget in configuration order.
 ///
 /// # Safety
 ///
 /// `surface.target` must be inside a `BeginDraw`/`EndDraw` pair and every brush must belong to it.
-unsafe fn draw(surface: &Surface, theme: &Theme, layouts: &Layouts) {
+unsafe fn draw(surface: &Surface, theme: &Theme, layouts: &Layouts, hover: Hover) {
     let (width, height) = layouts.size;
 
     // SAFETY: the caller guarantees an open draw call and brushes of this target.
@@ -506,55 +542,123 @@ unsafe fn draw(surface: &Surface, theme: &Theme, layouts: &Layouts) {
             &surface.stroke,
         );
 
-        draw_launcher(surface, height, theme.corner_radius);
-        draw_profile(surface, layouts);
-        draw_clock(surface, layouts);
-        draw_metrics(surface, layouts);
+        for widget in &layouts.widgets {
+            let placement = widget.placement;
+            let fade = match placement.kind {
+                WidgetKind::Launcher => hover.launcher,
+                WidgetKind::Settings => hover.settings,
+                _ => 0.0,
+            };
+
+            if fade > 0.0 && matches!(placement.kind, WidgetKind::Launcher | WidgetKind::Settings) {
+                draw_hover_backdrop(surface, theme, &placement, fade);
+            }
+
+            match placement.kind {
+                WidgetKind::Launcher => draw_launcher(
+                    &surface.target,
+                    (placement.x, placement.y),
+                    theme.corner_radius,
+                    &surface.text,
+                    0.9 + 0.1 * fade,
+                ),
+                WidgetKind::Settings => draw_gear(
+                    &surface.target,
+                    (
+                        placement.x + placement.width / 2.0,
+                        placement.y + placement.height / 2.0,
+                    ),
+                    &surface.dim,
+                    &surface.background,
+                    0.9 + 0.1 * fade,
+                ),
+                kind => {
+                    let brush = if matches!(kind, WidgetKind::Text) {
+                        &surface.text
+                    } else {
+                        &surface.dim
+                    };
+
+                    if let Some(main) = widget.main.as_ref() {
+                        surface.target.DrawTextLayout(
+                            vector(placement.x, placement.y),
+                            main,
+                            brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        );
+                    }
+
+                    if let (Some(sub), Some(sub_placement)) = (widget.sub.as_ref(), placement.sub) {
+                        surface.target.DrawTextLayout(
+                            vector(sub_placement.x, sub_placement.y),
+                            sub,
+                            &surface.dim,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
-/// The profile name, right of the launcher glyph, vertically centred.
+/// The soft rounded fill behind a hovered glyph.
 ///
 /// # Safety
 ///
 /// Must be called inside an open draw call on `surface.target`.
-unsafe fn draw_profile(surface: &Surface, layouts: &Layouts) {
-    let (_, height) = layouts.size;
+unsafe fn draw_hover_backdrop(surface: &Surface, theme: &Theme, placement: &Placement, fade: f32) {
+    let radius = (theme.corner_radius * 0.5).clamp(2.0, 8.0);
+    let rect = D2D_RECT_F {
+        left: placement.x - HOVER_PAD,
+        top: placement.y - HOVER_PAD,
+        right: placement.x + placement.width + HOVER_PAD,
+        bottom: placement.y + placement.height + HOVER_PAD,
+    };
 
-    // SAFETY: the caller guarantees an open draw call and layouts built for this target.
+    // SAFETY: the caller guarantees an open draw call; the opacity is restored so the next frame
+    // starts from a known state, and a brush change re-uses the same object rather than making one.
     unsafe {
-        surface.target.DrawTextLayout(
-            vector(
-                PADDING + GLYPH + GAP,
-                (height - layouts.profile_size.height) / 2.0,
-            ),
-            &layouts.profile,
-            &surface.dim,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        surface.hover.SetOpacity(SURFACE_ALPHA * fade);
+        surface.target.FillRoundedRectangle(
+            &D2D1_ROUNDED_RECT {
+                rect,
+                radiusX: radius,
+                radiusY: radius,
+            },
+            &surface.hover,
         );
+        surface.hover.SetOpacity(1.0);
     }
 }
 
-/// The four-square launcher glyph on the left edge.
+/// The four-square launcher glyph, at `origin`.
 ///
 /// The tiles' softness is the theme's corner radius scaled down: a theme with sharper corners gets a
-/// sharper glyph, and the shipped `liquid-glass` radius of 14 lands on the 1.6 DIP the design uses.
+/// sharper glyph, and the shipped radius of 14 lands on the 1.6 DIP the design uses.
 ///
 /// # Safety
 ///
-/// Must be called inside an open draw call on `surface.target`.
-unsafe fn draw_launcher(surface: &Surface, height: f32, corner_radius: f32) {
+/// `target` must be inside an open draw call and `brush` must belong to it.
+unsafe fn draw_launcher(
+    target: &ID2D1HwndRenderTarget,
+    origin: (f32, f32),
+    radius: f32,
+    brush: &ID2D1SolidColorBrush,
+    opacity: f32,
+) {
     const TILE: f32 = 6.5;
     const STEP: f32 = 9.5;
 
-    let radius = (corner_radius * 0.115).clamp(0.5, TILE / 2.0);
-    let left = PADDING;
-    let top = (height - GLYPH) / 2.0;
+    let radius = (radius * 0.115).clamp(0.5, TILE / 2.0);
+    let (left, top) = origin;
 
-    for (column, row) in [(0.0, 0.0), (STEP, 0.0), (0.0, STEP), (STEP, STEP)] {
-        // SAFETY: the caller guarantees an open draw call on this target.
-        unsafe {
-            surface.target.FillRoundedRectangle(
+    // SAFETY: the caller guarantees an open draw call on this target.
+    unsafe {
+        brush.SetOpacity(opacity.clamp(0.0, 1.0));
+
+        for (column, row) in [(0.0, 0.0), (STEP, 0.0), (0.0, STEP), (STEP, STEP)] {
+            target.FillRoundedRectangle(
                 &D2D1_ROUNDED_RECT {
                     rect: D2D_RECT_F {
                         left: left + column,
@@ -565,78 +669,11 @@ unsafe fn draw_launcher(surface: &Surface, height: f32, corner_radius: f32) {
                     radiusX: radius,
                     radiusY: radius,
                 },
-                &surface.text,
+                brush,
             );
         }
-    }
-}
 
-/// The centred two-line clock: `HH:mm`, with the long date underneath when the bar is tall enough.
-///
-/// # Safety
-///
-/// Must be called inside an open draw call on `surface.target`.
-unsafe fn draw_clock(surface: &Surface, layouts: &Layouts) {
-    let (width, height) = layouts.size;
-    let date_height = if layouts.date.is_some() {
-        layouts.date_size.height
-    } else {
-        0.0
-    };
-    let total = layouts.clock_size.height + date_height;
-    let top = ((height - total) / 2.0).max(0.0);
-
-    // SAFETY: the caller guarantees an open draw call and layouts built for this target.
-    unsafe {
-        surface.target.DrawTextLayout(
-            vector((width - layouts.clock_size.width) / 2.0, top),
-            &layouts.clock,
-            &surface.text,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-        );
-
-        if let Some(date) = layouts.date.as_ref() {
-            surface.target.DrawTextLayout(
-                vector(
-                    (width - layouts.date_size.width) / 2.0,
-                    top + layouts.clock_size.height,
-                ),
-                date,
-                &surface.dim,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-        }
-    }
-}
-
-/// The readout and the gear on the right edge.
-///
-/// # Safety
-///
-/// Must be called inside an open draw call on `surface.target`.
-unsafe fn draw_metrics(surface: &Surface, layouts: &Layouts) {
-    let (width, height) = layouts.size;
-    let gear_left = width - PADDING - GEAR;
-    let gear_top = (height - GEAR) / 2.0;
-    let text_right = gear_left - GAP;
-    let text_left = text_right - layouts.metrics_size.width;
-    let text_top = (height - layouts.metrics_size.height) / 2.0;
-
-    // SAFETY: the caller guarantees an open draw call and layouts built for this target.
-    unsafe {
-        surface.target.DrawTextLayout(
-            vector(text_left, text_top),
-            &layouts.metrics,
-            &surface.dim,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-        );
-
-        draw_gear(
-            &surface.target,
-            (gear_left + GEAR / 2.0, gear_top + GEAR / 2.0),
-            &surface.dim,
-            &surface.background,
-        );
+        brush.SetOpacity(1.0);
     }
 }
 
@@ -650,6 +687,7 @@ unsafe fn draw_gear(
     centre: (f32, f32),
     ink: &ID2D1SolidColorBrush,
     hole: &ID2D1SolidColorBrush,
+    opacity: f32,
 ) {
     let circle = |x: f32, y: f32, diameter: f32| D2D1_ROUNDED_RECT {
         rect: D2D_RECT_F {
@@ -664,6 +702,8 @@ unsafe fn draw_gear(
 
     // SAFETY: the caller guarantees an open draw call on this target.
     unsafe {
+        ink.SetOpacity(opacity.clamp(0.0, 1.0));
+
         for step in 0..8 {
             let angle = std::f32::consts::FRAC_PI_4 * step as f32;
             target.FillRoundedRectangle(
@@ -678,6 +718,8 @@ unsafe fn draw_gear(
 
         target.FillRoundedRectangle(&circle(centre.0, centre.1, 6.0), ink);
         target.FillRoundedRectangle(&circle(centre.0, centre.1, 2.6), hole);
+
+        ink.SetOpacity(1.0);
     }
 }
 
@@ -688,101 +730,193 @@ fn vector(x: f32, y: f32) -> Vector2 {
 
 /// Measured width and height of one layout, in device-independent pixels.
 #[derive(Debug, Clone, Copy, Default)]
-struct Measured {
+struct Box_ {
     width: f32,
     height: f32,
 }
 
-/// One measured block of text plus the layout that draws it.
+/// One widget's drawing state: where it goes and the layouts that draw it.
+#[derive(Debug)]
+pub struct WidgetLayout {
+    /// The rectangle the layout placed it in.
+    pub placement: Placement,
+    /// The main line, or `None` for a glyph-only widget.
+    main: Option<IDWriteTextLayout>,
+    /// The date under a clock, when the widget has one.
+    sub: Option<IDWriteTextLayout>,
+}
+
+/// One measured widget, plus the text layout that draws it.
 #[derive(Debug)]
 pub struct Layouts {
-    clock: IDWriteTextLayout,
-    date: Option<IDWriteTextLayout>,
-    metrics: IDWriteTextLayout,
-    profile: IDWriteTextLayout,
-    clock_size: Measured,
-    date_size: Measured,
-    metrics_size: Measured,
-    profile_size: Measured,
+    widgets: Vec<WidgetLayout>,
     size: (f32, f32),
 }
 
 impl Layouts {
     /// Builds every layout the frame needs.
     ///
-    /// Called when the text, the size or the DPI changed — never from `paint`.
+    /// Called when the text, the widgets, the theme, the size or the DPI changed — never from
+    /// `paint`.
     ///
     /// # Errors
     ///
     /// [`RenderError`] when DirectWrite refuses a layout; the caller then keeps its previous layouts
     /// and draws a slightly stale frame, which is better than a blank bar.
-    pub fn build(text: &BarText, show_date: bool, size: (f32, f32)) -> Result<Self, RenderError> {
+    pub fn build(
+        texts: &[WidgetText],
+        widgets: &[WidgetSpec],
+        theme: &Theme,
+        size: (f32, f32),
+    ) -> Result<Self, RenderError> {
         let resources = Resources::shared()?;
-        let fonts = &resources.fonts;
         let dwrite = resources.dwrite();
+        let formats = Formats::create(dwrite, theme)?;
+        let two_lines = size.1 >= TWO_LINE_MIN_HEIGHT;
+        let max_width = (size.0 - 2.0 * PADDING).max(1.0);
 
-        let clock = layout(dwrite, &fonts.clock, text.time.as_units(), size, Trim::No)?;
-        let clock_size = measure(&clock)?;
+        let mut measured: Vec<Measured> = Vec::with_capacity(widgets.len());
+        let mut main: Vec<Option<IDWriteTextLayout>> = Vec::with_capacity(widgets.len());
+        let mut sub: Vec<Option<IDWriteTextLayout>> = Vec::with_capacity(widgets.len());
 
-        let date = if show_date {
-            let created = layout(dwrite, &fonts.date, text.date.as_units(), size, Trim::No)?;
-            let measured = measure(&created)?;
-            Some((created, measured))
-        } else {
-            None
-        };
-        let (date, date_size) = match date {
-            Some((date, measured)) => (Some(date), measured),
-            None => (None, Measured::default()),
-        };
+        for (index, spec) in widgets.iter().enumerate() {
+            let text = texts.get(index);
+            let empty = WidgetText::default();
+            let text = text.unwrap_or(&empty);
+            let mut widget = Measured::default();
 
-        // The clock owns the middle of the bar, so neither side may grow into it.
-        let half = (size.0 / 2.0).max(1.0);
-        let metrics = layout(
-            dwrite,
-            &fonts.metrics,
-            text.metrics.as_units(),
-            ((half - PADDING - GEAR - GAP).max(1.0), size.1),
-            Trim::No,
-        )?;
-        let metrics_size = measure(&metrics)?;
+            match spec.kind {
+                WidgetKind::Launcher => {
+                    widget.width = GLYPH;
+                    widget.height = GLYPH;
+                }
+                WidgetKind::Settings => {
+                    widget.width = GEAR;
+                    widget.height = GEAR;
+                }
+                WidgetKind::Spacer => {}
+                kind => {
+                    let format = formats.for_widget(kind);
+                    let trim = if matches!(
+                        kind,
+                        WidgetKind::Profile | WidgetKind::Text | WidgetKind::Media
+                    ) {
+                        Trim::Yes
+                    } else {
+                        Trim::No
+                    };
 
-        let profile = layout(
-            dwrite,
-            &fonts.profile,
-            text.profile.as_units(),
-            ((half - PADDING - GLYPH - GAP).max(1.0), size.1),
-            Trim::Yes,
-        )?;
-        let profile_size = measure(&profile)?;
+                    let created = layout(
+                        dwrite,
+                        format,
+                        text.main.as_units(),
+                        (max_width, size.1.max(1.0)),
+                        trim,
+                    )?;
+                    let boxed = measure(&created)?;
+                    widget.width = boxed.width;
+                    widget.height = boxed.height;
+                    main.push(Some(created));
+
+                    if two_lines && !text.sub.is_empty() {
+                        let created = layout(
+                            dwrite,
+                            &formats.date,
+                            text.sub.as_units(),
+                            (max_width, size.1.max(1.0)),
+                            Trim::No,
+                        )?;
+                        let boxed = measure(&created)?;
+                        widget.sub_width = boxed.width;
+                        widget.sub_height = boxed.height;
+                        sub.push(Some(created));
+                    } else {
+                        sub.push(None);
+                    }
+
+                    measured.push(widget);
+                    continue;
+                }
+            }
+
+            main.push(None);
+            sub.push(None);
+            measured.push(widget);
+        }
+
+        let placements = place(widgets, &measured, size);
+        let mut laid_out = Vec::with_capacity(placements.len());
+
+        for placement in placements {
+            let main_layout = main.get_mut(placement.index).and_then(Option::take);
+            let sub_layout = match placement.sub {
+                Some(sub_placement) if sub_placement.index == placement.index => {
+                    sub.get_mut(placement.index).and_then(Option::take)
+                }
+                Some(sub_placement) => main.get_mut(sub_placement.index).and_then(Option::take),
+                None => None,
+            };
+
+            laid_out.push(WidgetLayout {
+                placement,
+                main: main_layout,
+                sub: sub_layout,
+            });
+        }
 
         Ok(Self {
-            clock,
-            date,
-            metrics,
-            profile,
-            clock_size,
-            date_size,
-            metrics_size,
-            profile_size,
+            widgets: laid_out,
             size,
         })
     }
 
-    /// Whether the date line fits in this shape.
+    /// The bar's size in device-independent pixels.
+    pub fn size(&self) -> (f32, f32) {
+        self.size
+    }
+
+    /// How many widgets were placed.
+    pub fn widget_count(&self) -> usize {
+        self.widgets.len()
+    }
+
+    /// Whether any widget draws a second line.
     pub fn show_date(&self) -> bool {
-        self.date.is_some()
+        self.widgets
+            .iter()
+            .any(|widget| widget.placement.sub.is_some())
     }
 
-    /// The profile name's measured size, which is where the clock may not start.
-    pub fn profile_size(&self) -> (f32, f32) {
-        (self.profile_size.width, self.profile_size.height)
+    /// What is under `(x, y)`, in device-independent pixels, with a few pixels of grace.
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<Hit> {
+        for widget in &self.widgets {
+            if !widget.placement.contains(x, y, HOVER_PAD) {
+                continue;
+            }
+
+            return match widget.placement.kind {
+                WidgetKind::Launcher => Some(Hit::Launcher),
+                WidgetKind::Settings => Some(Hit::Settings),
+                _ => None,
+            };
+        }
+
+        None
     }
 
-    /// Every measured height, for the layout log line.
-    pub fn heights(&self) -> (f32, f32) {
-        (self.clock_size.height, self.date_size.height)
+    /// The placed widgets, in configuration order.
+    pub fn widgets(&self) -> &[WidgetLayout] {
+        &self.widgets
     }
+}
+
+/// A glyph a pointer can be over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hit {
+    /// The launcher tile.
+    Launcher,
+    /// The settings tile.
+    Settings,
 }
 
 /// Whether a layout ends in an ellipsis when it does not fit.
@@ -790,7 +924,7 @@ impl Layouts {
 enum Trim {
     /// Overflow is a caller error, so nothing is trimmed.
     No,
-    /// A long profile name is cut with an ellipsis instead of spilling over the clock.
+    /// A long name is cut with an ellipsis instead of spilling over its neighbour.
     Yes,
 }
 
@@ -875,14 +1009,14 @@ unsafe fn trim_with_ellipsis(
 }
 
 /// Reads a layout's measured size.
-fn measure(layout: &IDWriteTextLayout) -> Result<Measured, RenderError> {
+fn measure(layout: &IDWriteTextLayout) -> Result<Box_, RenderError> {
     let mut metrics = DWRITE_TEXT_METRICS::default();
 
     // SAFETY: `metrics` is a live out-parameter of the size the API documents.
     unsafe { layout.GetMetrics(&mut metrics) }
         .map_err(|error| RenderError::call("measure a text layout", error))?;
 
-    Ok(Measured {
+    Ok(Box_ {
         width: metrics.widthIncludingTrailingWhitespace,
         height: metrics.height,
     })
@@ -965,21 +1099,33 @@ mod tests {
     }
 
     #[test]
-    fn the_fonts_resolve_on_this_machine() {
-        // `Resources::create` fails when no family in a list resolves, so a shared instance is proof
-        // that all four formats exist.
-        let resources = Resources::shared().expect("this machine must have Direct2D and Segoe UI");
+    fn a_theme_font_resolves_on_this_machine() {
+        let resources = Resources::shared().expect("this machine must have Direct2D");
+        let formats = Formats::create(resources.dwrite(), &Theme::baked_in())
+            .expect("the baked-in font must exist");
 
         assert!(
             unsafe {
                 resources
                     .dwrite()
-                    .CreateEllipsisTrimmingSign(&resources.fonts.clock)
+                    .CreateEllipsisTrimmingSign(&formats.clock)
             }
             .is_ok()
         );
         assert_eq!(UI_FAMILIES[1], "Segoe UI");
         assert_eq!(MONO_FAMILIES[1], "Consolas");
+    }
+
+    #[test]
+    fn an_unknown_theme_font_falls_back_to_the_ui_families() {
+        let resources = Resources::shared().expect("this machine must have Direct2D");
+        let mut theme = Theme::baked_in();
+        theme.font = "No Such Font Family 404".to_owned();
+
+        let formats = Formats::create(resources.dwrite(), &theme)
+            .expect("the fallback list must resolve a font");
+
+        assert!(unsafe { resources.dwrite().CreateEllipsisTrimmingSign(&formats.body) }.is_ok());
     }
 
     #[test]

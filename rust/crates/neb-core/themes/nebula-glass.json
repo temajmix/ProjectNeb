@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "nebula-glass",
+  "name": "Nebula Glass",
+  "description": "The shipped ProjectNeb look: deep violet glass with a soft lavender accent.",
+  "author": "ProjectNeb",
+  "tokens": {
+    "background": "#0B0A12",
+    "surface": "#1E1A2E",
+    "stroke": "#2B2544",
+    "text": "#F6F4FF",
+    "textDim": "#B7B3C9",
+    "accent": "#A78BFA",
+    "accent2": "#7C5CFF",
+    "radius": 14,
+    "opacity": 0.92,
+    "blur": false,
+    "font": "Segoe UI Variable Text",
+    "barHeight": 40,
+    "dockTile": 56
+  }
+}

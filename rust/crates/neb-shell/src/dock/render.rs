@@ -168,6 +168,50 @@ struct TileArt {
     running: bool,
 }
 
+/// What one frame of the dock draws besides its content: how far it has slid in, and which tiles
+/// are fading their hover highlight in or out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameFx {
+    /// `0.0` fully below its strip, `1.0` in place.
+    pub slide: f32,
+    /// The tile the pointer is on.
+    pub hover: Option<usize>,
+    /// How far that tile's highlight has faded in, `0..=1`.
+    pub hover_fade: f32,
+    /// The tile the pointer just left, while its highlight fades out.
+    pub previous: Option<usize>,
+    /// How far the previous tile's highlight still is, `0..=1`.
+    pub previous_fade: f32,
+}
+
+impl FrameFx {
+    /// A settled, un-hovered frame.
+    pub fn settled() -> Self {
+        Self {
+            slide: 1.0,
+            hover: None,
+            hover_fade: 0.0,
+            previous: None,
+            previous_fade: 0.0,
+        }
+    }
+
+    /// The opacity of `slot`'s hover highlight.
+    pub fn hover_fade(&self, slot: usize) -> f32 {
+        let mut opacity = 0.0;
+
+        if self.hover == Some(slot) {
+            opacity = self.hover_fade;
+        }
+
+        if self.previous == Some(slot) {
+            opacity = opacity.max(self.previous_fade);
+        }
+
+        opacity
+    }
+}
+
 /// One dock window's drawing state.
 #[derive(Debug)]
 pub struct DockRenderer {
@@ -452,7 +496,7 @@ impl DockRenderer {
         hwnd: HWND,
         plan: &DockPlan,
         items: &[DockItem],
-        hover: Option<usize>,
+        frame: FrameFx,
     ) -> PaintOutcome {
         if let Err(error) = self.resize(
             u32::try_from(plan.width).unwrap_or(1),
@@ -463,7 +507,7 @@ impl DockRenderer {
 
         self.sync(items, plan);
 
-        match self.draw(plan, hover) {
+        match self.draw(plan, frame) {
             Ok(()) => {}
             Err(error) if error.is_recreate() => return PaintOutcome::Recreate,
             Err(error) => return PaintOutcome::Failed(error),
@@ -486,7 +530,7 @@ impl DockRenderer {
     }
 
     /// Draws the whole strip: glass, outline and one tile per slot.
-    fn draw(&self, plan: &DockPlan, hover: Option<usize>) -> Result<(), RenderError> {
+    fn draw(&self, plan: &DockPlan, frame: FrameFx) -> Result<(), RenderError> {
         let metrics = plan.metrics;
         let scale = self.scale();
         let width = plan.width as f32 * scale;
@@ -505,21 +549,33 @@ impl DockRenderer {
             radiusY: radius,
         };
 
-        let frame = RECT {
+        let frame_rect = RECT {
             left: 0,
             top: 0,
             right: plan.width,
             bottom: plan.height,
         };
 
+        // A reveal starts fully below the strip and rises into place; a hide sinks back out. The
+        // offset is applied to the whole frame, so the glass moves with its tiles.
+        let offset = (1.0 - frame.slide.clamp(0.0, 1.0)) * height;
+
         // SAFETY: the DIB is live and at least `plan.width × plan.height` pixels, every brush belongs
         // to this target, and the whole frame is inside one `BeginDraw`/`EndDraw` pair.
         unsafe {
             self.target
-                .BindDC(self.dib.hdc, &frame)
+                .BindDC(self.dib.hdc, &frame_rect)
                 .map_err(|error| RenderError::call("bind the dock bitmap", error))?;
             self.target.BeginDraw();
             self.target.Clear(Some(&D2D1_COLOR_F::default()));
+            self.target.SetTransform(&Matrix3x2 {
+                M11: 1.0,
+                M12: 0.0,
+                M21: 0.0,
+                M22: 1.0,
+                M31: 0.0,
+                M32: offset,
+            });
 
             self.target
                 .FillRoundedRectangle(&strip, &self.brushes.glass);
@@ -531,7 +587,8 @@ impl DockRenderer {
                 let top = (metrics.border + metrics.padding) as f32 * scale;
                 let side = metrics.tile as f32 * scale;
 
-                if hover == Some(slot) {
+                let fade = frame.hover_fade(slot);
+                if fade > 0.0 {
                     let tile = D2D1_ROUNDED_RECT {
                         rect: D2D_RECT_F {
                             left,
@@ -542,7 +599,9 @@ impl DockRenderer {
                         radiusX: side * 0.22,
                         radiusY: side * 0.22,
                     };
+                    self.brushes.hover.SetOpacity(fade.clamp(0.0, 1.0));
                     self.target.FillRoundedRectangle(&tile, &self.brushes.hover);
+                    self.brushes.hover.SetOpacity(1.0);
                 }
 
                 if slot >= plan.visible {
@@ -553,6 +612,7 @@ impl DockRenderer {
                 self.draw_tile(slot, left, top, side, metrics);
             }
 
+            self.target.SetTransform(&Matrix3x2::identity());
             self.target.EndDraw(None, None)
         }
         .map_err(|error| RenderError::call("end a dock frame", error))

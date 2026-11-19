@@ -1,10 +1,11 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-//! `neb-supervisor` — the resident process manager for the Rust build.
+//! `ProjectNeb` — the single entry point and resident process manager for the Rust build.
 //!
-//! It owns `neb-shell.exe`, `neb-wallpaper.exe` and, once it exists, `neb-app.exe`: it starts what
-//! the configuration enables, restarts a crash no sooner than the throttle allows, repairs a
-//! taskbar a dead shell left hidden, and answers on `ProjectNeb.supervisor`.
+//! It owns `neb-shell.exe`, `neb-wallpaper.exe` and `neb-app.exe`: it starts what the configuration
+//! enables, opens the main window, restarts a crash no sooner than the throttle allows, repairs a
+//! taskbar a dead shell left hidden, and answers on `ProjectNeb.supervisor`. A second launch does
+//! not start a second copy: it asks the running instance to focus the window and exits.
 //!
 //! Two diagnostics modes ride along, because a resident process is hard to watch otherwise:
 //! `--soak <minutes> --interval <seconds>` writes a CSV of every `neb-*` working set and prints a
@@ -15,23 +16,31 @@
 //! No async runtime, no GUI, no WebView2: a plain loop over `WaitForSingleObject` and a named pipe.
 
 mod children;
+mod settings;
 mod soak;
 mod supervisor;
 mod taskbar_repair;
+mod tray;
+mod update;
+mod windows_mode;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use neb_core::ipc;
 use neb_core::strings::{self, Language, Text};
+use serde_json::Value;
 
-use supervisor::Supervisor;
+use supervisor::{Reporter, Supervisor};
 
 /// What the tool understands.
 const USAGE: &str = "\
-usage: neb-supervisor [options]
+usage: ProjectNeb [options]
 
 options:
+  --no-settings, --tray-only  start the children without opening the main window (autostart)
+  --open-settings             open or focus the main window on a running instance
   --shell <path>              shell executable (default: neb-shell.exe next to this one)
   --wallpaper <path>          wallpaper executable (default: neb-wallpaper.exe next to this one)
   --soak <minutes>            start the children and sample every neb-* process
@@ -40,11 +49,17 @@ options:
   --spawn-test <command...>   supervise one command instead of the configured children
   --for <seconds>             stop after that long instead of running until stopped
   --report-memory             print this process's working set and exit
+  --no-tray                   do not create the notification icon
+  --no-updates                do not check the update manifest
   --quiet                     keep transitions out of stdout
   --help                      this text
 
-exit codes: 0 success, 1 failure (a usage error or a failed soak check)
+exit codes: 0 success, 1 failure (a usage error, an unreachable running instance or a failed
+soak check)
 ";
+
+/// How long a second launch waits for the running supervisor to answer `app.openSettings`.
+const SECOND_LAUNCH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Why an invocation could not run.
 #[derive(Debug, thiserror::Error)]
@@ -71,7 +86,7 @@ fn main() -> ExitCode {
             if matches!(error, CliError::Usage(_)) {
                 eprint!("{USAGE}");
             }
-            eprintln!("neb-supervisor: {error}");
+            eprintln!("ProjectNeb: {error}");
             ExitCode::FAILURE
         }
     }
@@ -91,6 +106,12 @@ fn run(argv: &[String]) -> Result<ExitCode, CliError> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    if options.open_settings {
+        return Ok(open_settings_on_a_running_instance(&options));
+    }
+
+    let diagnostic = options.soak_minutes.is_some() || options.spawn_test.is_some();
+
     let mut supervisor = match Supervisor::start(supervisor::Options {
         shell: options.shell,
         wallpaper: options.wallpaper,
@@ -99,12 +120,23 @@ fn run(argv: &[String]) -> Result<ExitCode, CliError> {
             (exe, command)
         }),
         echo: !options.quiet,
+        tray: options.tray,
+        updates: options.updates,
         ..supervisor::Options::default()
     })? {
         Some(supervisor) => supervisor,
-        // Another supervisor owns the session; leaving it alone is the whole point of the mutex.
-        None => return Ok(ExitCode::SUCCESS),
+        // Another supervisor owns the session. Its window is the one the user asked for, so this
+        // process forwards the request and leaves instead of becoming a second resident copy.
+        None => {
+            return Ok(forward_to_running(|| {
+                settings::request(SECOND_LAUNCH_TIMEOUT)
+            }));
+        }
     };
+
+    if options.settings && !diagnostic {
+        supervisor.open_settings();
+    }
 
     if let Some(minutes) = options.soak_minutes {
         let outcome = soak::run(
@@ -129,6 +161,56 @@ fn run(argv: &[String]) -> Result<ExitCode, CliError> {
     supervisor.shutdown();
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// Forwards the second launch to the instance that owns the mutex.
+///
+/// Success means the running supervisor took `app.openSettings`; a transport failure is reported
+/// with the reason and exits 1, because leaving silently would look like the window opened.
+fn forward_outcome(attempt: impl FnOnce() -> Result<Value, ipc::IpcError>) -> Result<(), String> {
+    attempt().map(|_| ()).map_err(|error| {
+        format!("another instance is running but did not accept 'app.openSettings': {error}")
+    })
+}
+
+/// The second-launch path: focus the existing window and leave.
+fn forward_to_running(attempt: impl FnOnce() -> Result<Value, ipc::IpcError>) -> ExitCode {
+    match forward_outcome(attempt) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(reason) => {
+            Reporter::new(true).error(&reason);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `--open-settings`: open the window on a running instance, or start it directly when no
+/// supervisor answers.
+fn open_settings_on_a_running_instance(options: &Options) -> ExitCode {
+    let reporter = Reporter::new(!options.quiet);
+
+    match settings::request(settings::OPEN_TIMEOUT) {
+        Ok(_) => {
+            reporter.info("app: the running supervisor was asked to open the main window");
+            return ExitCode::SUCCESS;
+        }
+        Err(error) => reporter.info(&format!(
+            "app: no running supervisor answered ({error}), starting the window directly"
+        )),
+    }
+
+    let Some(exe) = settings::app_exe() else {
+        reporter.error("app: neb-app.exe is not next to ProjectNeb.exe");
+        return ExitCode::FAILURE;
+    };
+
+    match settings::spawn(&exe) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(reason) => {
+            reporter.error(&format!("app: {reason}"));
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Prints this process's working set, the number the 10 MB budget is about.
@@ -164,6 +246,10 @@ struct Options {
     shell: Option<PathBuf>,
     /// `--wallpaper`: the wallpaper to run.
     wallpaper: Option<PathBuf>,
+    /// `--no-settings` / `--tray-only`: start the children without the main window.
+    settings: bool,
+    /// `--open-settings`: open or focus the window on the running instance.
+    open_settings: bool,
     /// `--soak`: how long to sample, in minutes.
     soak_minutes: Option<u64>,
     /// `--interval`: seconds between samples.
@@ -176,6 +262,10 @@ struct Options {
     run_for: Option<u64>,
     /// `--report-memory`: print the working set and exit.
     report_memory: bool,
+    /// `--no-tray`: no notification icon.
+    tray: bool,
+    /// `--no-updates`: no update checks.
+    updates: bool,
     /// `--quiet`: no transitions on stdout.
     quiet: bool,
     /// `--help`.
@@ -187,12 +277,16 @@ impl Default for Options {
         Self {
             shell: None,
             wallpaper: None,
+            settings: true,
+            open_settings: false,
             soak_minutes: None,
             interval: soak::DEFAULT_INTERVAL.as_secs(),
             soak_check: false,
             spawn_test: None,
             run_for: None,
             report_memory: false,
+            tray: true,
+            updates: true,
             quiet: false,
             help: false,
         }
@@ -217,6 +311,10 @@ impl Options {
             match argument.as_str() {
                 "--help" | "-h" => options.help = true,
                 "--quiet" => options.quiet = true,
+                "--no-tray" => options.tray = false,
+                "--no-updates" => options.updates = false,
+                "--no-settings" | "--tray-only" => options.settings = false,
+                "--open-settings" => options.open_settings = true,
                 "--soak-check" => options.soak_check = true,
                 "--report-memory" => options.report_memory = true,
                 "--shell" => {
@@ -293,6 +391,54 @@ mod tests {
         assert_eq!(options.interval, 10);
         assert!(options.soak_minutes.is_none());
         assert!(!options.quiet);
+        assert!(options.tray, "the shipped run has a notification icon");
+        assert!(options.updates);
+        assert!(options.settings, "a normal launch opens the main window");
+        assert!(!options.open_settings);
+    }
+
+    #[test]
+    fn the_window_can_be_skipped_for_autostart_and_tray_only_is_an_alias() {
+        let hidden = Options::parse(&argv(&["--no-settings"])).expect("parse");
+        assert!(!hidden.settings);
+        assert!(hidden.tray, "the tray still appears");
+
+        let alias = Options::parse(&argv(&["--tray-only"])).expect("parse");
+        assert!(!alias.settings);
+        assert_eq!(alias, hidden);
+    }
+
+    #[test]
+    fn open_settings_is_its_own_mode() {
+        let options = Options::parse(&argv(&["--open-settings"])).expect("parse");
+
+        assert!(options.open_settings);
+        assert!(
+            options.settings,
+            "the flag does not change the default launch"
+        );
+    }
+
+    #[test]
+    fn a_second_launch_forwards_and_exits_zero_only_when_the_instance_answers() {
+        let focused = forward_outcome(|| Ok(serde_json::json!({ "ok": true })));
+        assert_eq!(focused, Ok(()));
+
+        let failed = forward_outcome(|| {
+            Err(ipc::IpcError::Unavailable {
+                pipe: supervisor::PIPE.to_owned(),
+            })
+        });
+        let reason = failed.expect_err("a dead pipe is a failure");
+        assert!(reason.contains("app.openSettings"), "{reason}");
+    }
+
+    #[test]
+    fn the_tray_and_the_updater_can_be_turned_off() {
+        let options = Options::parse(&argv(&["--no-tray", "--no-updates"])).expect("parse");
+
+        assert!(!options.tray);
+        assert!(!options.updates);
     }
 
     #[test]
@@ -389,6 +535,9 @@ mod tests {
             "--soak-check",
             "--spawn-test",
             "--report-memory",
+            "--no-settings",
+            "--tray-only",
+            "--open-settings",
         ] {
             assert!(USAGE.contains(switch), "usage must mention {switch}");
         }

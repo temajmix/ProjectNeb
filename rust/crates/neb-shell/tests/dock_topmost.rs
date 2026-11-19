@@ -72,6 +72,8 @@ fn the_dock_asks_for_the_topmost_band_when_it_is_placed() {
         language: Language::En,
         items: items(&["notepad"]),
         auto_hide: false,
+        tile_dip: neb_shell::dock::layout::TILE_DIP,
+        animations: Default::default(),
         host: std::sync::Arc::clone(&recorder) as std::sync::Arc<dyn DockPlacement>,
     })
     .expect("the dock must be created");

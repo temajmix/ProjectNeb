@@ -30,6 +30,9 @@ commands:
   ping <pipe> [--timeout-ms MS] [--json]      call 'ping' on a running process
   windows [--json]                            visible top-level windows
   mem [--json]                                this process's working set
+  release --version X.Y.Z --notes TEXT        publish a release, its manifest and changelog
+          [--channel beta] [--manifest-repo DIR] [--dry-run]
+          [--skip-tests] [--skip-installer]
   help                                        this text
 
 exit codes: 0 success, 1 failure
@@ -67,6 +70,9 @@ fn run(argv: &[String]) -> Result<(), CliError> {
         "ping" => commands::ping::run(rest),
         "windows" => commands::windows::run(rest),
         "mem" => commands::metrics::run_mem(rest),
+        "release" => commands::release::run(rest),
+        // Diagnostics for the Theme Manager; deliberately absent from the usage text.
+        "themes" => commands::themes::run(rest),
         other => Err(CliError::Usage(format!("unknown command '{other}'"))),
     }
 }
@@ -96,7 +102,7 @@ mod tests {
     fn help_is_success_and_mentions_every_command() {
         assert!(run(&argv(&["help"])).is_ok());
 
-        for command in ["config", "metrics", "ping", "windows", "mem"] {
+        for command in ["config", "metrics", "ping", "windows", "mem", "release"] {
             assert!(USAGE.contains(command), "usage must mention {command}");
         }
     }

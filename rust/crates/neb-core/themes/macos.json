@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "macos",
+  "name": "macOS",
+  "description": "A compact frosted bar with a bright system-blue accent.",
+  "author": "ProjectNeb",
+  "tokens": {
+    "background": "#1C1C1E",
+    "surface": "#2C2C2E",
+    "stroke": "#3A3A3C",
+    "text": "#F5F5F7",
+    "textDim": "#A1A1A6",
+    "accent": "#0A84FF",
+    "accent2": "#64D2FF",
+    "radius": 12,
+    "opacity": 0.86,
+    "blur": true,
+    "font": "Segoe UI Variable Text",
+    "barHeight": 36,
+    "dockTile": 52
+  }
+}

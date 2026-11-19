@@ -9,12 +9,14 @@
 //!
 //! * [`app`] — the application: configuration, the bar set, and the window loop;
 //! * [`window`] — bar and controller windows, their procedures and the messages between them;
+//! * [`bar`] — the configurable widgets, their text and their pure layout;
+//! * [`anim`] — easing curves and one-shot transitions, with no timer of their own;
 //! * [`dock`] — the dock: pinned and running apps, its window, its icons and its auto-hide;
 //! * [`launcher`] — the launcher: the Start Menu index, fuzzy search and the `Alt+Space` panel;
 //! * [`icons`] — application icons extracted through the shell and cached as BGRA pixels;
 //! * [`appbar`] — reserving and releasing the edge;
 //! * [`render`] — Direct2D/DirectWrite, with every brush, format and layout cached;
-//! * [`theme`] — reading the palette from the same `themes/*.json` the C# build reads;
+//! * [`theme`] — the palette, converted from the shared theme tokens;
 //! * [`widgets`] — the clock and the metrics readout, formatted into fixed buffers;
 //! * [`metrics_feed`] — the CPU and memory sampler;
 //! * [`ipc`] — the `ProjectNeb.shell` pipe;
@@ -22,8 +24,10 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod anim;
 pub mod app;
 pub mod appbar;
+pub mod bar;
 pub mod dock;
 pub mod geometry;
 pub mod icons;
