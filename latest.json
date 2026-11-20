@@ -1,17 +1,17 @@
 {
-  "version": "0.6.1",
+  "version": "0.7.0",
   "channel": "beta",
-  "released": "2026-11-19",
-  "notes": "Accessibility pass: focus rings, accessible names, contrast fixes (text 5.69:1, accent 4.82:1), reduced motion, Russian plurals. Version metadata aligned; regression sweep passed (install/uninstall, 13 screens, crash recovery, local update, 10-min soak).",
+  "released": "2026-11-20",
+  "notes": "Desktop side docks (left/right, auto-hide, labels) and a centered analog clock; eight premium theme presets with contrast checks and a desktop-mockup gallery; the bar settings button now opens the settings window.",
   "changelogUrl": "https://github.com/temajmix/ProjectNeb/blob/main/CHANGELOG.md",
   "assets": {
     "portable": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.6.1/ProjectNeb-0.6.1-beta-portable.zip",
-      "sha256": "1F77A8954FFA5DC87FA15D0359E0EFDF64DCB78BC03A73C31FAADE0032A69B2E"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.7.0/ProjectNeb-0.7.0-beta-portable.zip",
+      "sha256": "690A289094C0D26366D471632701595155FEA0593528C914B08D55CAF0783CEA"
     },
     "setup": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.6.1/ProjectNeb-0.6.1-beta-setup.exe",
-      "sha256": "DC0BB8A06D6443FD36B0A1449681D3AC44450E24AE05B2AE7AAD88ECBA1F1C6F"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.7.0/ProjectNeb-0.7.0-beta-setup.exe",
+      "sha256": "4ECD4555528367A160FD5B2B40E97F338B7585DB430F6FC2089FECCBACC05A40"
     }
   }
 }

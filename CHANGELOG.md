@@ -2,6 +2,10 @@
 
 Все заметные изменения ProjectNeb. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 
+## [0.7.0] — 2026-11-20
+
+Desktop side docks (left/right, auto-hide, labels) and a centered analog clock; eight premium theme presets with contrast checks and a desktop-mockup gallery; the bar settings button now opens the settings window.
+
 ## [0.6.1] — 2026-11-19
 
 Accessibility pass: focus rings, accessible names, contrast fixes (text 5.69:1, accent 4.82:1), reduced motion, Russian plurals. Version metadata aligned; regression sweep passed (install/uninstall, 13 screens, crash recovery, local update, 10-min soak).
