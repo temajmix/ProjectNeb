@@ -1,17 +1,17 @@
 {
-  "version": "0.7.0",
+  "version": "0.8.0",
   "channel": "beta",
-  "released": "2026-11-20",
-  "notes": "Desktop side docks (left/right, auto-hide, labels) and a centered analog clock; eight premium theme presets with contrast checks and a desktop-mockup gallery; the bar settings button now opens the settings window.",
+  "released": "2026-11-25",
+  "notes": "Caelestia Dark/Light одним применением: вертикальный бар с автоскрытием и стеклянными пилюлями, карточка рабочего стола (часы, календарь, CPU/RAM), анимированные обои с Ken Burns, персонализация Windows (тёмный режим, акцент, обои, прозрачность) с откатом, командный лаунчер (>theme, >dark, >light, >wallpaper, >lock, >sleep), галерея тем и обоев, оптимизация памяти и кадров.",
   "changelogUrl": "https://github.com/temajmix/ProjectNeb/blob/main/CHANGELOG.md",
   "assets": {
     "portable": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.7.0/ProjectNeb-0.7.0-beta-portable.zip",
-      "sha256": "690A289094C0D26366D471632701595155FEA0593528C914B08D55CAF0783CEA"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.8.0/ProjectNeb-0.8.0-beta-portable.zip",
+      "sha256": "AEF01865C70A6164F752212D0FA460DE316230975ADF1AB0616DC079107EB654"
     },
     "setup": {
-      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.7.0/ProjectNeb-0.7.0-beta-setup.exe",
-      "sha256": "4ECD4555528367A160FD5B2B40E97F338B7585DB430F6FC2089FECCBACC05A40"
+      "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.8.0/ProjectNeb-0.8.0-beta-setup.exe",
+      "sha256": "C9BE0B3B5E3465D232654807EA00175779C1735AC55CF109ACF8A6677628CF06"
     }
   }
 }

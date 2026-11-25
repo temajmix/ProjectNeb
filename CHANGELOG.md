@@ -2,6 +2,10 @@
 
 Все заметные изменения ProjectNeb. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 
+## [0.8.0] — 2026-11-25
+
+Caelestia Dark/Light одним применением: вертикальный бар с автоскрытием и стеклянными пилюлями, карточка рабочего стола (часы, календарь, CPU/RAM), анимированные обои с Ken Burns, персонализация Windows (тёмный режим, акцент, обои, прозрачность) с откатом, командный лаунчер (>theme, >dark, >light, >wallpaper, >lock, >sleep), галерея тем и обоев, оптимизация памяти и кадров.
+
 ## [0.7.0] — 2026-11-20
 
 Desktop side docks (left/right, auto-hide, labels) and a centered analog clock; eight premium theme presets with contrast checks and a desktop-mockup gallery; the bar settings button now opens the settings window.
