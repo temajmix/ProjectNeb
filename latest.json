@@ -7,7 +7,7 @@
   "assets": {
     "portable": {
       "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.8.0/ProjectNeb-0.8.0-beta-portable.zip",
-      "sha256": "AEF01865C70A6164F752212D0FA460DE316230975ADF1AB0616DC079107EB654"
+      "sha256": "836B8859F76F53D7CE4060972088617780A30B0F782BA6B218B2287C7D5D1854"
     },
     "setup": {
       "url": "https://github.com/temajmix/ProjectNeb/releases/download/v0.8.0/ProjectNeb-0.8.0-beta-setup.exe",
